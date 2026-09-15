@@ -6,3 +6,4 @@ config.json
 credentials.json
 reports/
 .DS_Store
+.worktrees/
