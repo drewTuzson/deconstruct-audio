@@ -33,6 +33,12 @@ When the user wants a Suno prompt and a Brain is configured, read [references/br
 
 Without a Brain, deliver the compact evidence-based style translation. Ask about output mode only when it changes the requested creative deliverable, not during analysis or setup. The user can connect or disconnect their Brain later.
 
+## Saved styles
+
+The user can keep style text that produced a generation they liked, then reuse it later. Read [references/styles.md](references/styles.md) for the commands and the rules for applying one.
+
+This works with or without Gemini, a Brain, or any prior analysis: saving and reuse are local file operations that never need a key. Use the stored text verbatim, state which parts of a merged prompt came from the saved style, and preserve any conflict with measured evidence instead of resolving it silently. Confirm the exact name before deleting; deletion cannot be undone.
+
 ## Failures and maintenance
 
 Read [references/troubleshooting.md](references/troubleshooting.md) for blocked authentication, quota, unavailable models, dependencies, partial responses or cleanup issues. Never dump environment variables, credential files, raw provider errors, or HTTP debug logs. Never silently switch models or retry a possibly billable request. No exact cost or platform-quality guarantees.
