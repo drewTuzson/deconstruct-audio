@@ -17,7 +17,11 @@ Saving and reuse are local file operations. They do not require Gemini, an API k
 
 Pass `--style -` to read the style text from stdin. Prefer that for anything long or containing quotes, so shell quoting cannot corrupt what gets saved.
 
-Names are matched by a slug, so `Warm Analog Soul`, `warm analog soul` and `WARM  ANALOG  SOUL` are the same style. A slug is a single lowercase token; a name that looks like a path is flattened into one, never followed. Saving over an existing name requires `--overwrite`. Deletion is immediate and cannot be undone, so confirm the exact name with `list-styles` before deleting, and never delete a style the user did not name.
+Names are matched by a slug, so `Warm Analog Soul`, `warm analog soul` and `WARM  ANALOG  SOUL` are the same style. Letters and digits in any script are kept, so a name like `東京` works and keeps its own identity; everything else becomes a separator. That makes a slug a single token, so a name shaped like a path is flattened into one and never followed. Two names that differ only in separators collide by design (`Night Drive` and `night-drive` are one style), so use `list-styles` when you are unsure whether a name is already taken.
+
+Saving over an existing name requires `--overwrite`. Deletion is immediate and cannot be undone, so confirm the exact name with `list-styles` before deleting, and never delete a style the user did not name.
+
+A style file that is unreadable or missing its name is skipped rather than guessed at: it will not appear in `list-styles`, `show-style` and `edit-style` will refuse it, and `doctor` reports the count as `unreadable_style_files` so a broken file is still discoverable.
 
 `--source` is provenance only. Record the report folder when the style came from one. A missing or moved source does not invalidate the saved text.
 

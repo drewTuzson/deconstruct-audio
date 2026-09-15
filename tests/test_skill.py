@@ -260,4 +260,51 @@ class SavedStyleTests(unittest.TestCase):
         with self.assertRaises(d.SkillError): d.read_style('Broken')
         self.assertEqual(d.all_styles(), [])
 
+    def test_unicode_names_keep_distinct_identities(self):
+        # ASCII-only slugging rejected non-Latin names and merged distinct ones.
+        self.save('\u6771\u4eac', style='city pop')
+        self.assertEqual(d.read_style('\u6771\u4eac')['style'], 'city pop')
+        self.save('na\u00efve', style='accented')
+        self.save('na ve', style='spaced')
+        self.assertNotEqual(d.style_slug('na\u00efve'), d.style_slug('na ve'))
+        self.assertEqual(d.read_style('na\u00efve')['style'], 'accented')
+        self.assertEqual(d.read_style('na ve')['style'], 'spaced')
+        for record in d.all_styles():
+            self.assertEqual(d.style_path(record['name']).parent, d.styles_dir())
+
+    def test_unicode_name_still_cannot_escape_or_overflow(self):
+        self.save('../\u6771\u4eac/../../etc/passwd', style='x')
+        for p in d.styles_dir().rglob('*'):
+            self.assertEqual(p.parent, d.styles_dir().resolve())
+        with self.assertRaises(d.SkillError):
+            d.style_slug('\u6771' * 119)
+
+    def test_existing_permissive_styles_dir_is_tightened(self):
+        if os.name == 'nt':
+            self.skipTest('POSIX permissions only')
+        d.styles_dir().mkdir(parents=True, exist_ok=True)
+        d.styles_dir().chmod(0o755)
+        self.save('Perm Check')
+        self.assertEqual(d.styles_dir().stat().st_mode & 0o077, 0)
+
+    def test_record_without_a_name_is_refused_not_crashed(self):
+        self.save('Nameless')
+        d.style_path('Nameless').write_text(json.dumps({'style': 'x'}), encoding='utf-8')
+        # Previously this was readable but raised KeyError inside write_style.
+        with self.assertRaises(d.SkillError): d.read_style('Nameless')
+        with self.assertRaises(d.SkillError):
+            d.cmd_edit_style(Obj(name='Nameless', style='y', notes=None))
+        self.assertEqual(d.all_styles(), [])
+        self.assertEqual(d.scan_styles()[1], 1)
+
+    def test_broken_styles_path_still_reports_diagnostics(self):
+        (d.config_dir()).mkdir(parents=True, exist_ok=True)
+        (d.config_dir() / 'styles').write_text('not a directory', encoding='utf-8')
+        self.assertEqual(d.scan_styles(), ([], 0))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            d.doctor()
+        self.assertEqual(json.loads(output.getvalue())['saved_styles'], 0)
+
+
 if __name__ == '__main__': unittest.main()

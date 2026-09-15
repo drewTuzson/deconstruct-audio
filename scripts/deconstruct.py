@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 import warnings
 
@@ -302,7 +303,9 @@ def doctor():
             checks['brain_path_valid'] = True
         except SkillError:
             checks['brain_path_valid'] = False
-    checks['saved_styles'] = len(all_styles())
+    styles, broken = scan_styles()
+    checks['saved_styles'] = len(styles)
+    checks['unreadable_style_files'] = broken
     print(json.dumps(checks, indent=2))
 
 MAX_STYLE_CHARS = 5000
@@ -317,15 +320,21 @@ def style_slug(name):
     """Identity for a saved style. Filesystem-safe by construction, never a path."""
     if not isinstance(name, str):
         raise SkillError('Style name must be text.')
-    text = name.strip()
+    text = unicodedata.normalize('NFC', name).strip()
     if not text:
         raise SkillError('Style name is empty.')
     if len(text) > 120:
         raise SkillError('Style name is too long. Use 120 characters or fewer.')
-    slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
-    # A slug is a single lowercase token, so '..', '/', and absolute paths cannot survive.
+    # Unicode letters and digits are kept, so a name in any script keeps its own
+    # identity instead of collapsing to the same slug as an unrelated name.
+    # Everything else becomes a separator, so '..', '/', and absolute paths
+    # cannot survive into a filename.
+    slug = ''.join(c if c.isalnum() else '-' for c in text.casefold())
+    slug = re.sub(r'-+', '-', slug).strip('-')
     if not slug:
         raise SkillError('Style name must contain at least one letter or number.')
+    if len(slug.encode('utf-8')) > 200:
+        raise SkillError('Style name is too long for a filename. Use a shorter name.')
     return slug
 
 def style_path(name):
@@ -339,16 +348,36 @@ def read_style(name):
         value = json.loads(p.read_text(encoding='utf-8'))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise SkillError('Cannot read that saved style file. Move it aside and save the style again.') from None
-    if not isinstance(value, dict) or any(
-        key in value and not isinstance(value[key], kind) for key, kind in STYLE_FIELDS.items()
-    ) or not isinstance(value.get('style'), str):
+    if not valid_style(value):
         raise SkillError('That saved style file is not valid. Move it aside and save the style again.')
     return value
 
-def write_style(value):
-    """Atomic replace so an interrupted write never truncates a saved style."""
+def valid_style(value):
+    """Every field edit-style and write_style rely on, checked in one place."""
+    return (
+        isinstance(value, dict)
+        and not any(key in value and not isinstance(value[key], kind)
+                    for key, kind in STYLE_FIELDS.items())
+        and isinstance(value.get('style'), str)
+        # write_style slugs value['name'], so a record without a usable name is
+        # readable but not editable unless it is rejected here too.
+        and isinstance(value.get('name'), str) and value['name'].strip()
+    )
+
+def secure_styles_dir():
+    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
     folder = styles_dir()
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt' and folder.stat().st_mode & 0o077:
+        try:
+            folder.chmod(0o700)
+        except OSError:
+            raise SkillError('The saved styles folder is readable by other users and its permissions could not be tightened. Run chmod 700 on that folder.') from None
+    return folder
+
+def write_style(value):
+    """Atomic replace so an interrupted write never truncates a saved style."""
+    folder = secure_styles_dir()
     target = folder / (style_slug(value['name']) + '.json')
     fd, name = tempfile.mkstemp(dir=folder)
     try:
@@ -360,20 +389,32 @@ def write_style(value):
             os.unlink(name)
     return target
 
-def all_styles():
+def scan_styles():
+    """Returns (readable records, count of files skipped as unreadable or invalid).
+
+    Never raises for a broken styles path: doctor reports local state precisely
+    when that state is broken.
+    """
     folder = styles_dir()
-    if not folder.exists():
-        return []
-    out = []
-    for p in sorted(folder.glob('*.json')):
+    out, broken = [], 0
+    try:
+        found = sorted(folder.glob('*.json')) if folder.is_dir() else []
+    except OSError:
+        return [], 0
+    for p in found:
         try:
             value = json.loads(p.read_text(encoding='utf-8'))
         except (OSError, UnicodeError, json.JSONDecodeError):
+            broken += 1
             continue
-        if isinstance(value, dict) and isinstance(value.get('style'), str):
-            value.setdefault('name', p.stem)
+        if valid_style(value):
             out.append(value)
-    return out
+        else:
+            broken += 1
+    return out, broken
+
+def all_styles():
+    return scan_styles()[0]
 
 def check_text(label, text, limit):
     if not isinstance(text, str) or not text.strip():
