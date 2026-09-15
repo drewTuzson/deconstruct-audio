@@ -68,6 +68,22 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
+| `save-style <name> --style <text>` | Saves style text you liked. `--style -` reads it from stdin. Add `--notes`, `--source`, or `--overwrite` |
+| `list-styles` | Lists every saved style with its slug, length, notes and source |
+| `show-style <name>` | Prints one saved style as JSON |
+| `edit-style <name>` | Changes `--style`, `--notes`, or both. An empty `--notes` clears them |
+| `rename-style <old> <new>` | Renames a saved style, refusing to overwrite another one |
+| `delete-style <name>` | Deletes a saved style. This cannot be undone |
+
+## Saved styles
+
+When a generation comes out the way you wanted, keep the style text that produced it:
+
+```
+save-style "Warm Analog Soul" --style "neo-soul, warm analog tape saturation, dusty Rhodes, brushed drums" --notes "best chorus so far"
+```
+
+Styles are stored one JSON file per style in your configuration directory, beside `config.json` and outside this package. Saving and reuse are local file operations: they need no API key, no completed onboarding, and no prior analysis, so a style you typed from memory works the same as one lifted from a report. Ask the agent to apply a saved style to a prompt and it uses the stored text verbatim, tells you which parts of the result came from which source, and surfaces any conflict with measured evidence rather than quietly averaging the two. See [references/styles.md](references/styles.md).
 
 ## What gets sent, and what it costs
 

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 import warnings
 
@@ -302,7 +303,202 @@ def doctor():
             checks['brain_path_valid'] = True
         except SkillError:
             checks['brain_path_valid'] = False
+    styles, broken = scan_styles()
+    checks['saved_styles'] = len(styles)
+    checks['unreadable_style_files'] = broken
     print(json.dumps(checks, indent=2))
+
+MAX_STYLE_CHARS = 5000
+MAX_NOTES_CHARS = 2000
+STYLE_FIELDS = {'name': str, 'style': str, 'notes': str, 'source': str,
+                'created_at': str, 'updated_at': str}
+
+def styles_dir():
+    return config_dir() / 'styles'
+
+def style_slug(name):
+    """Identity for a saved style. Filesystem-safe by construction, never a path."""
+    if not isinstance(name, str):
+        raise SkillError('Style name must be text.')
+    text = unicodedata.normalize('NFC', name).strip()
+    if not text:
+        raise SkillError('Style name is empty.')
+    if len(text) > 120:
+        raise SkillError('Style name is too long. Use 120 characters or fewer.')
+    # Unicode letters and digits are kept, so a name in any script keeps its own
+    # identity instead of collapsing to the same slug as an unrelated name.
+    # Everything else becomes a separator, so '..', '/', and absolute paths
+    # cannot survive into a filename.
+    slug = ''.join(c if c.isalnum() else '-' for c in text.casefold())
+    slug = re.sub(r'-+', '-', slug).strip('-')
+    if not slug:
+        raise SkillError('Style name must contain at least one letter or number.')
+    if len(slug.encode('utf-8')) > 200:
+        raise SkillError('Style name is too long for a filename. Use a shorter name.')
+    return slug
+
+def style_path(name):
+    return styles_dir() / (style_slug(name) + '.json')
+
+def read_style(name):
+    p = style_path(name)
+    if not p.exists():
+        raise SkillError('No saved style named ' + repr(name.strip()) + '. Run list-styles to see what is saved.')
+    try:
+        value = json.loads(p.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise SkillError('Cannot read that saved style file. Move it aside and save the style again.') from None
+    if not valid_style(value):
+        raise SkillError('That saved style file is not valid. Move it aside and save the style again.')
+    return value
+
+def valid_style(value):
+    """Every field edit-style and write_style rely on, checked in one place."""
+    return (
+        isinstance(value, dict)
+        and not any(key in value and not isinstance(value[key], kind)
+                    for key, kind in STYLE_FIELDS.items())
+        and isinstance(value.get('style'), str)
+        # write_style slugs value['name'], so a record without a usable name is
+        # readable but not editable unless it is rejected here too.
+        and isinstance(value.get('name'), str) and value['name'].strip()
+    )
+
+def secure_styles_dir():
+    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
+    folder = styles_dir()
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt' and folder.stat().st_mode & 0o077:
+        try:
+            folder.chmod(0o700)
+        except OSError:
+            raise SkillError('The saved styles folder is readable by other users and its permissions could not be tightened. Run chmod 700 on that folder.') from None
+    return folder
+
+def write_style(value):
+    """Atomic replace so an interrupted write never truncates a saved style."""
+    folder = secure_styles_dir()
+    target = folder / (style_slug(value['name']) + '.json')
+    fd, name = tempfile.mkstemp(dir=folder)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, indent=2, ensure_ascii=False)
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    return target
+
+def scan_styles():
+    """Returns (readable records, count of files skipped as unreadable or invalid).
+
+    Never raises for a broken styles path: doctor reports local state precisely
+    when that state is broken.
+    """
+    folder = styles_dir()
+    out, broken = [], 0
+    try:
+        found = sorted(folder.glob('*.json')) if folder.is_dir() else []
+    except OSError:
+        return [], 0
+    for p in found:
+        try:
+            value = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            broken += 1
+            continue
+        if valid_style(value):
+            out.append(value)
+        else:
+            broken += 1
+    return out, broken
+
+def all_styles():
+    return scan_styles()[0]
+
+def check_text(label, text, limit):
+    if not isinstance(text, str) or not text.strip():
+        raise SkillError(label + ' is empty.')
+    if len(text) > limit:
+        raise SkillError(label + ' is too long. Use ' + str(limit) + ' characters or fewer.')
+    return text.strip()
+
+def read_style_text(value):
+    """'-' reads stdin so a long style never has to survive shell quoting."""
+    if value == '-':
+        return sys.stdin.read()
+    return value
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+def cmd_save_style(args):
+    slug = style_slug(args.name)
+    existing = style_path(args.name).exists()
+    if existing and not args.overwrite:
+        raise SkillError('A style named ' + repr(slug) + ' already exists. Use edit-style, or pass --overwrite to replace it.')
+    record = {
+        'name': args.name.strip(),
+        'style': check_text('Style text', read_style_text(args.style), MAX_STYLE_CHARS),
+        'created_at': read_style(args.name).get('created_at', now()) if existing else now(),
+        'updated_at': now(),
+    }
+    if args.notes:
+        record['notes'] = check_text('Notes', args.notes, MAX_NOTES_CHARS)
+    if args.source:
+        record['source'] = str(args.source)
+    write_style(record)
+    print(('STYLE_REPLACED ' if existing else 'STYLE_SAVED ') + slug)
+
+def cmd_list_styles(args):
+    items = all_styles()
+    if not items:
+        print('NO_SAVED_STYLES. Save one with save-style.')
+        return
+    print(json.dumps([
+        {'slug': style_slug(x['name']), 'name': x['name'],
+         'chars': len(x['style']), 'updated_at': x.get('updated_at', ''),
+         'notes': x.get('notes', ''), 'source': x.get('source', '')}
+        for x in items], indent=2, ensure_ascii=False))
+
+def cmd_show_style(args):
+    print(json.dumps(read_style(args.name), indent=2, ensure_ascii=False))
+
+def cmd_edit_style(args):
+    if args.style is None and args.notes is None:
+        raise SkillError('Nothing to change. Pass --style, --notes, or both.')
+    record = read_style(args.name)
+    if args.style is not None:
+        record['style'] = check_text('Style text', read_style_text(args.style), MAX_STYLE_CHARS)
+    if args.notes is not None:
+        if args.notes.strip():
+            record['notes'] = check_text('Notes', args.notes, MAX_NOTES_CHARS)
+        else:
+            # An empty --notes clears the field rather than failing.
+            record.pop('notes', None)
+    record['updated_at'] = now()
+    write_style(record)
+    print('STYLE_UPDATED ' + style_slug(record['name']))
+
+def cmd_rename_style(args):
+    record = read_style(args.name)
+    old = style_path(args.name)
+    new_slug = style_slug(args.new_name)
+    if new_slug != style_slug(args.name) and style_path(args.new_name).exists():
+        raise SkillError('A style named ' + repr(new_slug) + ' already exists. Choose another name.')
+    record['name'] = args.new_name.strip()
+    record['updated_at'] = now()
+    write_style(record)
+    if style_slug(args.name) != new_slug:
+        old.unlink(missing_ok=True)
+    print('STYLE_RENAMED ' + new_slug)
+
+def cmd_delete_style(args):
+    p = style_path(args.name)
+    if not p.exists():
+        raise SkillError('No saved style named ' + repr(args.name.strip()) + '. Nothing deleted.')
+    p.unlink()
+    print('STYLE_DELETED ' + style_slug(args.name) + '. This cannot be undone.')
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -315,6 +511,20 @@ def main():
     a.add_argument('--local-only', action='store_true')
     b = sub.add_parser('connect-brain'); b.add_argument('path', type=Path)
     m = sub.add_parser('set-model'); m.add_argument('model')
+    sub.add_parser('list-styles')
+    s = sub.add_parser('save-style')
+    s.add_argument('name')
+    s.add_argument('--style', required=True, help="Style text, or '-' to read it from stdin.")
+    s.add_argument('--notes', default=None)
+    s.add_argument('--source', default=None, help='Report path or other provenance for this style.')
+    s.add_argument('--overwrite', action='store_true')
+    for cmd in ('show-style', 'delete-style'):
+        sub.add_parser(cmd).add_argument('name')
+    e = sub.add_parser('edit-style')
+    e.add_argument('name')
+    e.add_argument('--style', default=None, help="New style text, or '-' to read it from stdin.")
+    e.add_argument('--notes', default=None, help='New notes. Pass an empty string to clear them.')
+    r = sub.add_parser('rename-style'); r.add_argument('name'); r.add_argument('new_name')
     args = p.parse_args()
     if args.command == 'doctor':
         doctor()
@@ -359,6 +569,18 @@ def main():
         print('SETUP_COMPLETE')
     elif args.command == 'analyze':
         run_analysis(args.audio, args.out, args.local_only)
+    elif args.command == 'save-style':
+        cmd_save_style(args)
+    elif args.command == 'list-styles':
+        cmd_list_styles(args)
+    elif args.command == 'show-style':
+        cmd_show_style(args)
+    elif args.command == 'edit-style':
+        cmd_edit_style(args)
+    elif args.command == 'rename-style':
+        cmd_rename_style(args)
+    elif args.command == 'delete-style':
+        cmd_delete_style(args)
 
 if __name__ == '__main__':
     for stream in (sys.stdout, sys.stderr):

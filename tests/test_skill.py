@@ -173,4 +173,138 @@ class CoreTests(unittest.TestCase):
         self.assertIn('<!-- STYLEBOX -->', text)
         self.assertEqual(json.loads((run / 'receipt.json').read_text())['status'], 'draft_needs_agent_review')
 
+
+class SavedStyleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name).resolve()
+        env = patch.dict(os.environ, {'DECONSTRUCT_AUDIO_CONFIG_DIR': str(self.path / 'private')})
+        env.start(); self.addCleanup(env.stop)
+        for name in ('GEMINI_API_KEY', 'GOOGLE_API_KEY'):
+            os.environ.pop(name, None)
+
+    def save(self, name, style='warm analog tape, dusty Rhodes', **kw):
+        d.cmd_save_style(Obj(name=name, style=style, notes=kw.get('notes'),
+                             source=kw.get('source'), overwrite=kw.get('overwrite', False)))
+
+    def test_saving_and_reading_needs_no_api_key(self):
+        with self.assertRaises(d.SkillError): d.api_key()
+        self.save('Warm Analog Soul', notes='best chorus so far')
+        record = d.read_style('warm  ANALOG  soul')
+        self.assertEqual(record['style'], 'warm analog tape, dusty Rhodes')
+        self.assertEqual(record['name'], 'Warm Analog Soul')
+        self.assertEqual(record['notes'], 'best chorus so far')
+
+    def test_styles_live_outside_the_package_and_stay_private(self):
+        self.save('Night Drive')
+        self.assertFalse((ROOT / 'styles').exists())
+        self.assertTrue((d.config_dir() / 'styles' / 'night-drive.json').exists())
+        if os.name != 'nt':
+            self.assertEqual(d.styles_dir().stat().st_mode & 0o077, 0)
+
+    def test_name_that_looks_like_a_path_cannot_escape_the_folder(self):
+        for hostile in ('../../../../etc/passwd', '/etc/passwd', '~/.ssh/id_rsa', 'a/../../b'):
+            d.cmd_delete_style(Obj(name=hostile)) if d.style_path(hostile).exists() else None
+            self.save(hostile, style='x')
+            written = d.style_path(hostile).resolve()
+            self.assertEqual(written.parent, d.styles_dir().resolve())
+        for escaped in d.styles_dir().rglob('*'):
+            self.assertEqual(escaped.parent, d.styles_dir().resolve())
+
+    def test_nameless_and_oversized_input_is_refused(self):
+        for bad in ('', '   ', '..', '...', '/', 'a' * 121):
+            with self.assertRaises(d.SkillError): d.style_slug(bad)
+        with self.assertRaises(d.SkillError): self.save('Empty', style='   ')
+        with self.assertRaises(d.SkillError): self.save('Big', style='a' * (d.MAX_STYLE_CHARS + 1))
+
+    def test_overwrite_is_explicit_and_keeps_created_at(self):
+        self.save('Keeper')
+        first = d.read_style('Keeper')['created_at']
+        with self.assertRaises(d.SkillError): self.save('keeper', style='different')
+        self.save('Keeper', style='different', overwrite=True)
+        again = d.read_style('Keeper')
+        self.assertEqual(again['style'], 'different')
+        self.assertEqual(again['created_at'], first)
+
+    def test_edit_changes_text_and_clears_notes(self):
+        self.save('Tweak', notes='original note')
+        d.cmd_edit_style(Obj(name='Tweak', style='revised text', notes=None))
+        self.assertEqual(d.read_style('Tweak')['style'], 'revised text')
+        self.assertEqual(d.read_style('Tweak')['notes'], 'original note')
+        d.cmd_edit_style(Obj(name='Tweak', style=None, notes=''))
+        self.assertNotIn('notes', d.read_style('Tweak'))
+        with self.assertRaises(d.SkillError):
+            d.cmd_edit_style(Obj(name='Tweak', style=None, notes=None))
+
+    def test_rename_moves_the_record_and_refuses_collisions(self):
+        self.save('Night Drive', style='synthwave')
+        self.save('Taken')
+        d.cmd_rename_style(Obj(name='Night Drive', new_name='Midnight Drive'))
+        self.assertFalse(d.style_path('Night Drive').exists())
+        self.assertEqual(d.read_style('Midnight Drive')['style'], 'synthwave')
+        with self.assertRaises(d.SkillError):
+            d.cmd_rename_style(Obj(name='Midnight Drive', new_name='Taken'))
+        self.assertEqual(d.read_style('Midnight Drive')['style'], 'synthwave')
+
+    def test_delete_removes_only_the_named_style(self):
+        self.save('Keep'); self.save('Drop')
+        d.cmd_delete_style(Obj(name='Drop'))
+        self.assertEqual([x['name'] for x in d.all_styles()], ['Keep'])
+        with self.assertRaises(d.SkillError):
+            d.cmd_delete_style(Obj(name='Drop'))
+
+    def test_corrupt_style_file_is_reported_not_guessed(self):
+        self.save('Broken')
+        d.style_path('Broken').write_text('{not json', encoding='utf-8')
+        with self.assertRaises(d.SkillError): d.read_style('Broken')
+        self.assertEqual(d.all_styles(), [])
+
+    def test_unicode_names_keep_distinct_identities(self):
+        # ASCII-only slugging rejected non-Latin names and merged distinct ones.
+        self.save('\u6771\u4eac', style='city pop')
+        self.assertEqual(d.read_style('\u6771\u4eac')['style'], 'city pop')
+        self.save('na\u00efve', style='accented')
+        self.save('na ve', style='spaced')
+        self.assertNotEqual(d.style_slug('na\u00efve'), d.style_slug('na ve'))
+        self.assertEqual(d.read_style('na\u00efve')['style'], 'accented')
+        self.assertEqual(d.read_style('na ve')['style'], 'spaced')
+        for record in d.all_styles():
+            self.assertEqual(d.style_path(record['name']).parent, d.styles_dir())
+
+    def test_unicode_name_still_cannot_escape_or_overflow(self):
+        self.save('../\u6771\u4eac/../../etc/passwd', style='x')
+        for p in d.styles_dir().rglob('*'):
+            self.assertEqual(p.parent, d.styles_dir().resolve())
+        with self.assertRaises(d.SkillError):
+            d.style_slug('\u6771' * 119)
+
+    def test_existing_permissive_styles_dir_is_tightened(self):
+        if os.name == 'nt':
+            self.skipTest('POSIX permissions only')
+        d.styles_dir().mkdir(parents=True, exist_ok=True)
+        d.styles_dir().chmod(0o755)
+        self.save('Perm Check')
+        self.assertEqual(d.styles_dir().stat().st_mode & 0o077, 0)
+
+    def test_record_without_a_name_is_refused_not_crashed(self):
+        self.save('Nameless')
+        d.style_path('Nameless').write_text(json.dumps({'style': 'x'}), encoding='utf-8')
+        # Previously this was readable but raised KeyError inside write_style.
+        with self.assertRaises(d.SkillError): d.read_style('Nameless')
+        with self.assertRaises(d.SkillError):
+            d.cmd_edit_style(Obj(name='Nameless', style='y', notes=None))
+        self.assertEqual(d.all_styles(), [])
+        self.assertEqual(d.scan_styles()[1], 1)
+
+    def test_broken_styles_path_still_reports_diagnostics(self):
+        (d.config_dir()).mkdir(parents=True, exist_ok=True)
+        (d.config_dir() / 'styles').write_text('not a directory', encoding='utf-8')
+        self.assertEqual(d.scan_styles(), ([], 0))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            d.doctor()
+        self.assertEqual(json.loads(output.getvalue())['saved_styles'], 0)
+
+
 if __name__ == '__main__': unittest.main()
