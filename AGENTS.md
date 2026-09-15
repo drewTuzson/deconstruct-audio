@@ -56,10 +56,12 @@ report that baseline as a regression.
 
 Break one of these and the PR does not ship, whatever else it fixes.
 
-- **Private files stay private.** The config directory, the credentials
-  file and the saved-styles folder are created at `0700` and written by
-  writing a temp file and calling `os.replace`. Never widen a mode, never
-  write a config file in place.
+- **Private files stay private.** The config directory and the saved-styles
+  folder are created at `0700`. Private files inside them are written
+  through `tempfile.mkstemp`, which creates at `0600`, and moved into place
+  with `os.replace`. `api_key` refuses to read `credentials.json` if any
+  group or other bit is set. Never widen a mode, never write one of these
+  files in place.
 - **A key never leaves the machine.** No API key in a command line, a log
   line, an error message, a test fixture or a commit. `set-key` reads it
   from a terminal with hidden input.
@@ -89,8 +91,10 @@ Break one of these and the PR does not ship, whatever else it fixes.
   tests set it to a temp path, which is the only reason running them does
   not touch your real key, model choice or saved styles. Any new test that
   touches config must do the same.
-- `GEMINI_API_KEY` and `GOOGLE_API_KEY` are read as a fallback when no
-  credentials file exists.
+- `GEMINI_API_KEY` and `GOOGLE_API_KEY` take precedence over
+  `credentials.json`, which is read only when neither is set. Setting either
+  one in a shell silently overrides the stored key, so unset them before you
+  trust what `doctor` reports. Setting both to different values is an error.
 - Default model is `gemini-3.8-flash`. `set-model` overrides it.
 - Audio input is capped at 30 minutes, and duration must be finite and
   above zero.
@@ -148,5 +152,7 @@ copy. Sync it, then confirm there is no drift:
 
 ```bash
 diff -rq --exclude=.git --exclude=.venv --exclude=__pycache__ \
+  --exclude=.worktrees --exclude=.env --exclude=config.json \
+  --exclude=credentials.json --exclude=reports --exclude=.DS_Store \
   <repo> <skills-dir>/deconstruct-audio
 ```
