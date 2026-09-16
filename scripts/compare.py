@@ -3,6 +3,7 @@
 
 RELATIVE_SEMITONES = 3
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
+VALID_MODES = {'major', 'minor'}
 FLATS_TO_SHARPS = {
     'DB': 'C#', 'EB': 'D#', 'GB': 'F#', 'AB': 'G#', 'BB': 'A#',
 }
@@ -38,6 +39,8 @@ def parse_key(value):
     if note_str in FLATS_TO_SHARPS:
         note_str = FLATS_TO_SHARPS[note_str]
     if note_str not in NOTES:
+        return None
+    if mode_str not in VALID_MODES:
         return None
     return NOTES.index(note_str), mode_str
 
@@ -93,8 +96,10 @@ def score(reference, candidate):
         axes.append({'axis': axis, 'label': gate['label'], 'reference': ref,
                      'candidate': cand, 'delta': delta, 'verdict': verdict, 'note': note})
     verdicts = [a['verdict'] for a in axes if a['verdict'] != 'UNKNOWN']
+    unknown_count = len(axes) - len(verdicts)
+    measured_count = len(verdicts)
     if not verdicts:
         overall = 'UNKNOWN'
     else:
         overall = 'FAIL' if 'FAIL' in verdicts else ('WARN' if 'WARN' in verdicts else 'PASS')
-    return {'axes': axes, 'verdict': overall}
+    return {'axes': axes, 'verdict': overall, 'measured': measured_count, 'unmeasured': unknown_count}

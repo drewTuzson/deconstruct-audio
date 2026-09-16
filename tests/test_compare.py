@@ -90,6 +90,28 @@ class CompareTests(unittest.TestCase):
         key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
         self.assertEqual(key_axis['verdict'], 'UNKNOWN')
 
+    def test_partial_measurement_shows_counts_with_pass(self):
+        candidate = {'tempo_bpm': 80.7, 'key': 'F# minor'}
+        result = c.score(REFERENCE, candidate)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(result['measured'], 2)
+        self.assertEqual(result['unmeasured'], 5)
+        # Counts must be present alongside verdict at top level
+        self.assertIn('measured', result)
+        self.assertIn('unmeasured', result)
+
+    def test_unparseable_key_like_banana_is_unknown_not_fail(self):
+        candidate = dict(REFERENCE, key='banana')
+        result = c.score(REFERENCE, candidate)
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'UNKNOWN')
+
+    def test_valid_but_unrelated_key_still_fails(self):
+        candidate = dict(REFERENCE, key='D major')
+        result = c.score(REFERENCE, candidate)
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'FAIL')
+
 
 if __name__ == '__main__':
     unittest.main()
