@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Score a candidate track against a reference on measured axes."""
-import json
-import sys
 
 RELATIVE_SEMITONES = 3
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
+FLATS_TO_SHARPS = {
+    'DB': 'C#', 'EB': 'D#', 'GB': 'F#', 'AB': 'G#', 'BB': 'A#',
+}
 
 GATES = {
     'tempo_bpm': {'kind': 'percent', 'limit': 5.0, 'label': 'Tempo'},
@@ -18,10 +19,27 @@ GATES = {
 
 
 def parse_key(value):
-    parts = str(value).strip().split()
-    if len(parts) != 2 or parts[0] not in NOTES:
+    s = str(value).strip()
+    # Handle space-separated or space-free input
+    if ' ' in s:
+        parts = s.split(' ', 1)
+    else:
+        # For no-space input like 'F#minor', extract first 1-2 chars as note
+        if len(s) >= 2 and s[1] in ('#', 'b'):
+            parts = [s[:2], s[2:]]
+        elif len(s) >= 1:
+            parts = [s[:1], s[1:]]
+        else:
+            return None
+    if len(parts) != 2:
         return None
-    return NOTES.index(parts[0]), parts[1].lower()
+    note_str, mode_str = parts[0].upper(), parts[1].lower()
+    # Map flats to sharps
+    if note_str in FLATS_TO_SHARPS:
+        note_str = FLATS_TO_SHARPS[note_str]
+    if note_str not in NOTES:
+        return None
+    return NOTES.index(note_str), mode_str
 
 
 def key_verdict(reference, candidate):
@@ -30,6 +48,9 @@ def key_verdict(reference, candidate):
     a, b = parse_key(reference), parse_key(candidate)
     if a is None or b is None:
         return 'UNKNOWN', 'key not parseable'
+    # After parsing, check for exact match (same note and mode after normalization)
+    if a == b:
+        return 'PASS', 'exact match after normalization'
     distance = (b[0] - a[0]) % 12
     if a[1] != b[1] and distance in (RELATIVE_SEMITONES, 12 - RELATIVE_SEMITONES):
         return 'WARN', 'relative major or minor, not the same tonal centre'
@@ -71,14 +92,9 @@ def score(reference, candidate):
             note = f'delta {delta:+.2f} against limit {gate["limit"]}'
         axes.append({'axis': axis, 'label': gate['label'], 'reference': ref,
                      'candidate': cand, 'delta': delta, 'verdict': verdict, 'note': note})
-    verdicts = [a['verdict'] for a in axes]
-    overall = 'FAIL' if 'FAIL' in verdicts else ('WARN' if 'WARN' in verdicts else 'PASS')
+    verdicts = [a['verdict'] for a in axes if a['verdict'] != 'UNKNOWN']
+    if not verdicts:
+        overall = 'UNKNOWN'
+    else:
+        overall = 'FAIL' if 'FAIL' in verdicts else ('WARN' if 'WARN' in verdicts else 'PASS')
     return {'axes': axes, 'verdict': overall}
-
-
-if __name__ == '__main__':
-    with open(sys.argv[1]) as f:
-        reference = json.load(f)
-    with open(sys.argv[2]) as f:
-        candidate = json.load(f)
-    print(json.dumps(score(reference, candidate), indent=2))

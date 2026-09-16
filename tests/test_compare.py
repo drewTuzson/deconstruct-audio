@@ -54,6 +54,42 @@ class CompareTests(unittest.TestCase):
         lra = next(a for a in result['axes'] if a['axis'] == 'lra_lu')
         self.assertEqual(lra['verdict'], 'UNKNOWN')
 
+    def test_empty_candidate_returns_unknown_not_pass(self):
+        result = c.score(REFERENCE, {})
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertTrue(all(a['verdict'] == 'UNKNOWN' for a in result['axes']))
+
+    def test_partial_measurement_shows_all_axes_but_verdict_from_compared(self):
+        candidate = {'tempo_bpm': 83.0}  # only tempo measured
+        result = c.score(REFERENCE, candidate)
+        self.assertEqual(result['verdict'], 'PASS')
+        # All 7 axes present in result
+        self.assertEqual(len(result['axes']), 7)
+        # One PASS (tempo), six UNKNOWN (not measured)
+        verdicts = [a['verdict'] for a in result['axes']]
+        self.assertEqual(verdicts.count('PASS'), 1)
+        self.assertEqual(verdicts.count('UNKNOWN'), 6)
+
+    def test_flat_key_matches_sharp_equivalent_exactly(self):
+        result = c.score(dict(REFERENCE, key='Gb minor'), dict(REFERENCE, key='F# minor'))
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'PASS')
+
+    def test_lowercase_key_normalizes(self):
+        result = c.score(REFERENCE, dict(REFERENCE, key='f# minor'))
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'PASS')
+
+    def test_no_space_key_normalizes(self):
+        result = c.score(REFERENCE, dict(REFERENCE, key='F#minor'))
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'PASS')
+
+    def test_unparseable_key_becomes_unknown(self):
+        result = c.score(REFERENCE, dict(REFERENCE, key='xyz invalid'))
+        key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+        self.assertEqual(key_axis['verdict'], 'UNKNOWN')
+
 
 if __name__ == '__main__':
     unittest.main()
