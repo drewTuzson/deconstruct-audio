@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Score a candidate track against a reference on measured axes."""
+"""Score a candidate track against a reference on measured axes.
+
+Pure by design and deliberately import-free: score() takes two dicts and
+returns a verdict, so nothing here depends on the state of the machine it
+runs on. That includes the standard library. isfinite is spelled out below
+rather than imported from math so that "this module imports nothing" stays a
+property a reader can confirm at a glance.
+"""
+
+INFINITY = float('inf')
+UNUSABLE_NOTE = 'value is not a usable number, so this axis was not scored'
 
 RELATIVE_SEMITONES = 3
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
@@ -17,6 +27,54 @@ GATES = {
     'section_count': {'kind': 'absolute', 'limit': 1, 'label': 'Section count'},
     'lead_register_midi': {'kind': 'absolute', 'limit': 5, 'label': 'Lead register'},
 }
+
+
+def usable_number(value):
+    """The value as a finite float, or None if it is not a number we can score.
+
+    Fact sheets are hand-authored JSON and the loader accepts any object, so a
+    quoted number or a null is an ordinary typo rather than an exotic input.
+    Before this guard, score({'section_count': 7}, {'section_count': '7'})
+    raised TypeError on the subtraction.
+
+    Nothing is coerced. Reading '7' as 7 would turn a typo into a measurement,
+    and this project exists because a pipeline reported musical facts it had
+    not earned. UNKNOWN is the honest answer to a value nothing can score.
+
+    Booleans are rejected even though bool subclasses int in Python, so True
+    would otherwise arrive as 1.0 and be scored. It read as 'delta -3.10
+    against limit 1.5' and returned FAIL: a confident verdict with a plausible
+    number attached, from a value that measured nothing. A boolean in a
+    numeric axis is an authoring mistake, not a measurement of any size.
+
+    NaN and the infinities are rejected for the same reason: both reached the
+    comparison and produced FAIL, which reads as a track that missed a gate
+    rather than arithmetic running on a non-measurement.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        value = float(value)
+    except (OverflowError, ValueError):
+        # An int too large to be a float is not a measurement either.
+        return None
+    if value != value:  # NaN is the only value that is unequal to itself.
+        return None
+    if value == INFINITY or value == -INFINITY:
+        return None
+    return value
+
+
+def unusable_sides(reference, candidate):
+    """Which sides, if either, hold a value that cannot be scored."""
+    return [name for name, value in (('reference', reference),
+                                     ('candidate', candidate))
+            if usable_number(value) is None]
+
+
+def unusable_note(reference, candidate):
+    return ' and '.join(unusable_sides(reference, candidate)).capitalize() + \
+        ' ' + UNUSABLE_NOTE
 
 
 def parse_key(value):
@@ -62,6 +120,11 @@ def key_verdict(reference, candidate):
 
 
 def tempo_verdict(reference, candidate):
+    # Guarded here rather than only in score(), because tempo_verdict is
+    # public and called directly, so the entry point has to be safe too.
+    if unusable_sides(reference, candidate):
+        return 'UNKNOWN', unusable_note(reference, candidate), None
+    reference, candidate = usable_number(reference), usable_number(candidate)
     if reference <= 0:
         return 'UNKNOWN', 'no reference tempo', None
     delta = candidate - reference
@@ -89,8 +152,13 @@ def score(reference, candidate):
             delta = None
         elif gate['kind'] == 'percent':
             verdict, note, delta = tempo_verdict(ref, cand)
+        elif unusable_sides(ref, cand):
+            # Not a finite number where a number is required. UNKNOWN, with a
+            # note that says the value was not usable, and no delta: there is
+            # nothing to subtract and no verdict anything has earned.
+            verdict, note, delta = 'UNKNOWN', unusable_note(ref, cand), None
         else:
-            delta = cand - ref
+            delta = usable_number(cand) - usable_number(ref)
             within = abs(delta) <= gate['limit']
             verdict = 'PASS' if within else 'FAIL'
             note = f'delta {delta:+.2f} against limit {gate["limit"]}'

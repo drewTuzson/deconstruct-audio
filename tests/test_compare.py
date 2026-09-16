@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import compare as c
 
+GATES_AXES = tuple(c.GATES)
 REFERENCE = {'tempo_bpm': 80.7, 'key': 'F# minor', 'intro_seconds': 12.1,
              'lra_lu': 4.1, 'low_end_share': 16.4, 'section_count': 7,
              'lead_register_midi': 42}
@@ -129,6 +130,105 @@ class CompareTests(unittest.TestCase):
         result = c.score(REFERENCE, candidate)
         key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
         self.assertEqual(key_axis['verdict'], 'FAIL')
+
+
+class UnusableValueTests(unittest.TestCase):
+    """Fact sheets are hand-authored JSON and the loader accepts any object,
+    so a quoted number or a null is an ordinary typo rather than an exotic
+    input. score({'section_count': 7}, {'section_count': '7'}) raised
+    TypeError: unsupported operand type(s) for -: 'str' and 'int'.
+
+    A value that is not a finite number where a number is required yields
+    UNKNOWN and says the value was not usable. It is never coerced, because
+    reading '7' as 7 would turn a typo into a measurement, and this project
+    exists because a pipeline reported confidently wrong musical facts.
+    """
+
+    NUMERIC_AXES = ('tempo_bpm', 'intro_seconds', 'lra_lu', 'low_end_share',
+                    'section_count', 'lead_register_midi')
+    UNUSABLE = {'quoted number': '7', 'non-numeric string': 'banana',
+                'empty string': '', 'boolean true': True,
+                'boolean false': False, 'nan': float('nan'),
+                'infinity': float('inf'), 'negative infinity': float('-inf'),
+                'list': [7], 'dict': {'value': 7},
+                'int too large for a float': 10 ** 400}
+
+    def test_an_unusable_value_is_unknown_on_either_side(self):
+        for axis in self.NUMERIC_AXES:
+            for label, value in self.UNUSABLE.items():
+                for side in ('candidate', 'reference'):
+                    with self.subTest(axis=axis, value=label, side=side):
+                        pair = {'reference': dict(REFERENCE),
+                                'candidate': dict(REFERENCE)}
+                        pair[side][axis] = value
+                        result = c.score(pair['reference'], pair['candidate'])
+                        got = next(a for a in result['axes'] if a['axis'] == axis)
+                        self.assertEqual(got['verdict'], 'UNKNOWN')
+                        self.assertIsNone(got['delta'])
+                        self.assertIn('not a usable number', got['note'])
+        # A JSON null means the axis was not measured, which is a different
+        # sentence from a value that could not be used. Both are UNKNOWN and
+        # neither crashes, and the note keeps saying which happened.
+        null = c.score(REFERENCE, dict(REFERENCE, lra_lu=None))
+        got = next(a for a in null['axes'] if a['axis'] == 'lra_lu')
+        self.assertEqual(got['verdict'], 'UNKNOWN')
+        self.assertIn('not measured', got['note'])
+
+    def test_an_unusable_axis_is_not_counted_as_measured(self):
+        # An axis nothing could score must not inflate MEASURED, which is
+        # what the fact sheet prints as evidence of how much was checked.
+        result = c.score(REFERENCE, dict(REFERENCE, section_count='7'))
+        self.assertEqual(result['measured'], 6)
+        self.assertEqual(result['unmeasured'], 1)
+
+    def test_a_quoted_number_is_never_coerced_into_a_match(self):
+        # '7' against 7 is the same number to a reader and no measurement at
+        # all to this tool. Silently coercing would print PASS for a typo.
+        result = c.score({'section_count': 7}, {'section_count': '7'})
+        axis = next(a for a in result['axes'] if a['axis'] == 'section_count')
+        self.assertEqual(axis['verdict'], 'UNKNOWN')
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertEqual(result['measured'], 0)
+
+    def test_a_boolean_is_not_a_usable_number(self):
+        # bool is a subclass of int in Python, so True would arrive as 1.0
+        # and be scored. Before this fix, {'lra_lu': True} against 4.1 read
+        # as 'delta -3.10 against limit 1.5' and returned FAIL: a confident
+        # verdict, with a plausible number attached, from a value that
+        # measured nothing. A boolean in a numeric axis is an authoring
+        # mistake, and the honest answer to a mistake is UNKNOWN.
+        for value in (True, False):
+            with self.subTest(value=value):
+                result = c.score(REFERENCE, dict(REFERENCE, lra_lu=value))
+                axis = next(a for a in result['axes'] if a['axis'] == 'lra_lu')
+                self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_nan_and_infinity_are_not_measurements(self):
+        # Both used to reach the comparison and produce FAIL. A delta of nan
+        # or inf is the arithmetic working on a non-measurement, not a track
+        # that missed the gate.
+        for value in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(value=value):
+                result = c.score(REFERENCE, dict(REFERENCE, tempo_bpm=value))
+                axis = next(a for a in result['axes'] if a['axis'] == 'tempo_bpm')
+                self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_tempo_verdict_is_safe_at_its_own_entry_point(self):
+        # tempo_verdict is public and called directly by tests and callers,
+        # so the guard cannot live only inside score().
+        for value in ('80.7', None, True, float('nan'), float('inf')):
+            with self.subTest(value=value):
+                self.assertEqual(c.tempo_verdict(80.7, value)[0], 'UNKNOWN')
+                self.assertEqual(c.tempo_verdict(value, 80.7)[0], 'UNKNOWN')
+
+    def test_an_unusable_value_never_crashes_any_axis(self):
+        # The blunt version of the whole finding: nothing in UNUSABLE, on any
+        # axis, on either side, may raise.
+        for axis in GATES_AXES:
+            for label, value in self.UNUSABLE.items():
+                with self.subTest(axis=axis, value=label):
+                    c.score(dict(REFERENCE, **{axis: value}),
+                            dict(REFERENCE, **{axis: value}))
 
 
 if __name__ == '__main__':
