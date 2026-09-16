@@ -127,7 +127,12 @@ class ConfigDirPermissionTests(unittest.TestCase):
                    / stems.DEFAULT_MODEL / audio.stem)
             out.mkdir(parents=True, exist_ok=True)
             for name in stems.STEM_NAMES:
-                (out / f'{name}.wav').write_bytes(b'RIFF0000WAVEfake')
+                # Large enough for stems.usable_stem to believe it. A 16-byte
+                # stem is what a truncated run leaves, and the cache is
+                # required to reject that, so a fake writing one would be
+                # simulating a corrupt separation rather than a clean one.
+                (out / f'{name}.wav').write_bytes(
+                    b'RIFF' + b'\0' * (stems.MIN_STEM_BYTES * 2))
 
             class Done:
                 returncode = 0
