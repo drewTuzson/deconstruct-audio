@@ -38,7 +38,7 @@ def usable_stem(path):
     forever, since the cache short-circuits before demucs is ever reached.
     """
     try:
-        info = path.stat()
+        info = Path(path).stat()
     except OSError:
         return False
     return stat.S_ISREG(info.st_mode) and info.st_size >= MIN_STEM_BYTES

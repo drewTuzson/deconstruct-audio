@@ -9,7 +9,7 @@ property a reader can confirm at a glance.
 """
 
 INFINITY = float('inf')
-UNUSABLE_NOTE = 'value is not a usable number, so this axis was not scored'
+UNUSABLE_NOTE = 'so this axis was not scored'
 
 RELATIVE_SEMITONES = 3
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
@@ -73,8 +73,11 @@ def unusable_sides(reference, candidate):
 
 
 def unusable_note(reference, candidate):
-    return ' and '.join(unusable_sides(reference, candidate)).capitalize() + \
-        ' ' + UNUSABLE_NOTE
+    sides = unusable_sides(reference, candidate)
+    subject = ' and '.join(sides).capitalize()
+    claim = ('values are not usable numbers' if len(sides) > 1
+             else 'value is not a usable number')
+    return f'{subject} {claim}, {UNUSABLE_NOTE}'
 
 
 def parse_key(value):
