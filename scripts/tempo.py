@@ -2,9 +2,15 @@
 """Tempo as a periodicity family. A single number hides metrical ambiguity."""
 import json
 import sys
+import warnings
 
-import librosa
-import numpy as np
+# measure.py runs as a captured subprocess, so its library warnings never
+# reach a user. tempo runs in-process, which removed that isolation: librosa
+# printed decoder warnings carrying absolute virtualenv paths straight to the
+# terminal. Suppress before the import, the same way measure.py does.
+warnings.filterwarnings('ignore')
+import librosa  # noqa: E402
+import numpy as np  # noqa: E402
 
 RATIOS = ((0.5, '0.5x'), (0.75, '3/4'), (1.0, '1x'),
           (4.0 / 3.0, '4/3'), (1.5, '1.5x'), (2.0, '2x'), (3.0, '3x'))

@@ -79,5 +79,30 @@ class BrokenInstallTests(unittest.TestCase):
         self.assertIn('python', checks)
 
 
+class ErrorSurfaceTests(unittest.TestCase):
+    """Every command fails through the project's own words. Library and
+    subprocess output never reaches the user, because it carries local paths
+    and, on the provider path, request data.
+    """
+
+    def run_cli(self, *argv):
+        env = dict(os.environ)
+        env['DECONSTRUCT_AUDIO_CONFIG_DIR'] = str(Path(self.tmp) / 'private')
+        return subprocess.run([sys.executable, str(SCRIPTS / 'deconstruct.py'), *argv],
+                              capture_output=True, text=True, timeout=300, env=env)
+
+    def setUp(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.tmp = holder.name
+
+    def test_tempo_on_a_missing_file_prints_no_library_warnings(self):
+        missing = Path(self.tmp) / 'missing.wav'
+        done = self.run_cli('tempo', str(missing))
+        self.assertNotIn('Warning', done.stderr)
+        self.assertNotIn('site-packages', done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
