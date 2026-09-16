@@ -524,6 +524,16 @@ def cmd_tempo(args):
     result = tempo_mod.tempo_family(target)
     print(json.dumps(result, indent=2))
 
+def cmd_compare(args):
+    import compare as compare_mod
+    reference = json.loads(args.reference.read_text(encoding='utf-8'))
+    candidate = json.loads(args.candidate.read_text(encoding='utf-8'))
+    result = compare_mod.score(reference, candidate)
+    for axis in result['axes']:
+        print(f'{axis["verdict"]:<8}{axis["label"]:<18}{axis["note"]}')
+    print(f'MEASURED={result["measured"]} UNMEASURED={result["unmeasured"]}')
+    print(f'VERDICT={result["verdict"]}')
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
@@ -542,6 +552,9 @@ def main():
     tp.add_argument('audio', type=Path)
     tp.add_argument('--from-drums', action='store_true',
                     help='Separate first and measure the drums stem. Recommended.')
+    cp = sub.add_parser('compare')
+    cp.add_argument('reference', type=Path)
+    cp.add_argument('candidate', type=Path)
     sub.add_parser('list-styles')
     s = sub.add_parser('save-style')
     s.add_argument('name')
@@ -587,6 +600,8 @@ def main():
         cmd_separate(args)
     elif args.command == 'tempo':
         cmd_tempo(args)
+    elif args.command == 'compare':
+        cmd_compare(args)
     elif args.command == 'connect-brain':
         root, sources = brain_sources(args.path)
         cfg = config(); cfg['brain_path'] = str(root); save_config(cfg)

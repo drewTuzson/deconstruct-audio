@@ -104,5 +104,18 @@ class CommandErrorSurfaceTests(unittest.TestCase):
         self.assertNotIn('Details suppressed', str(ctx.exception))
 
 
+@unittest.skipUnless(os.environ.get('DECONSTRUCT_AUDIO_RUN_SEPARATION') == '1',
+                     'set DECONSTRUCT_AUDIO_RUN_SEPARATION=1 to run real separation')
+class SeparationIntegrationTests(unittest.TestCase):
+    def test_real_separation_produces_six_usable_stems(self):
+        source = os.environ.get('DECONSTRUCT_AUDIO_TEST_TRACK')
+        self.assertTrue(source, 'set DECONSTRUCT_AUDIO_TEST_TRACK to an audio file')
+        with tempfile.TemporaryDirectory() as tmp:
+            result = stems.separate(Path(source), Path(tmp))
+            self.assertEqual(set(result), set(stems.STEM_NAMES))
+            for name, path in result.items():
+                self.assertGreater(path.stat().st_size, 1024, f'{name} stem is empty')
+
+
 if __name__ == '__main__':
     unittest.main()
