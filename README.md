@@ -23,7 +23,8 @@ The script stops at a draft on purpose. Reconciling a tempo the model heard as 8
 
 - Python 3.10 or newer
 - ffmpeg and ffprobe on PATH
-- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey), for `analyze` only. The measurement commands need no key
+- For `separate`, and for `tempo --from-drums`, a Demucs and torch install of several gigabytes plus a model download on first use
 - An agent host that can run local scripts, such as Claude Code or Codex
 
 Uploading this folder into a chat window does not install anything or grant filesystem access. A chat-only assistant can read a finished report; it cannot run the analyzer.
@@ -54,6 +55,9 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 .venv/bin/python scripts/deconstruct.py verify
 .venv/bin/python scripts/deconstruct.py finish-setup
 .venv/bin/python scripts/deconstruct.py analyze /path/to/track.wav --out /path/to/reports
+.venv/bin/python scripts/deconstruct.py separate /path/to/track.wav
+.venv/bin/python scripts/deconstruct.py tempo /path/to/track.wav --from-drums
+.venv/bin/python scripts/deconstruct.py compare reference.json candidate.json
 ```
 
 | Command | What it does |
@@ -65,6 +69,9 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `finish-setup` | Marks onboarding complete, but only after a successful verification of the current key and model |
 | `analyze <file>` | Runs the full pipeline and prints `DRAFT_WRITTEN=<path>` |
 | `analyze <file> --local-only` | Measures without any network call. Produces no listening assessment and no style line |
+| `separate <file>` | Splits the audio into six stems with Demucs and prints `STEM_<NAME>=<path>` for each. Cached by source hash, so a repeat run reuses them. `--out` puts the cache somewhere other than the configuration directory |
+| `tempo <file>` | Reports tempo as a family of related candidates with a confidence grade, not a single number. Add `--from-drums` to separate first and measure the drums stem |
+| `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -74,6 +81,20 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `edit-style <name>` | Changes `--style`, `--notes`, or both. An empty `--notes` clears them |
 | `rename-style <old> <new>` | Renames a saved style, refusing to overwrite another one |
 | `delete-style <name>` | Deletes a saved style. This cannot be undone |
+
+## Measuring instead of describing
+
+`analyze` asks a model what it hears. These three commands do not ask anything; they measure, and they say how sure they are.
+
+`separate` runs Demucs over the file and writes six stems: drums, bass, guitar, piano, vocals, other. The six-stem model is used rather than the default four-stem split because that one buries guitar inside an "other" bucket. Stems are cached under your configuration directory and keyed by a hash of the source, so analysing the same track twice separates it once.
+
+`tempo` reports a periodicity family rather than a number, because the interesting failure is not noise, it is metrical level. Three tracks from one artist all read 76 to 81 on the drums tempogram while a beat tracker on the same stem said 103 to 112, a 4/3 ratio apart, and picking one silently is how a wrong tempo ships. The output carries a primary BPM, every related candidate with the ratio that relates it, each method's own reading, and a grade of `KNOW`, `INFER` or `UNKNOWN`. `INFER` means the tempogram still shows support for a competing metrical level, so the primary may be an octave or a subdivision off and the true value is in the family. `UNKNOWN` means the methods disagree by no simple ratio and none was chosen for you.
+
+`compare` scores one fact sheet against another, axis by axis, against gates set deliberately loose so partial progress is visible rather than everything failing at once. It scores only the axes measured on both sides: the rest are counted as unmeasured and never assumed to pass, so `MEASURED=` and `UNMEASURED=` print above the verdict. The exit code is the verdict, which is what a wrapping script gates on: 0 PASS, 2 FAIL, 3 WARN, 4 UNKNOWN, and 1 if the command itself failed. The reference comes first and the pair cannot be told apart from the files, so the report echoes which path was which.
+
+```
+compare reference.json candidate.json
+```
 
 ## Saved styles
 
@@ -101,7 +122,9 @@ Credentials live outside the package, in `~/.config/deconstruct-audio/` or where
 - **Key scores are correlations against major and minor templates, not probabilities.** Music built on other systems will not fit those templates, and the report says so.
 - **Section boundaries come from feature clustering.** They are suggestions, not verified verses and choruses.
 - **Genre and perceived era are interpretations**, and the skill instructs the agent to keep them labeled that way.
-- There is no stem separation, no plugin chain recovery, and no track count. The prompt forbids inventing them.
+- **A tempo family is not a tempo.** `tempo` grades itself, and an `INFER` primary can be an octave or a subdivision away from the true reading, which is then sitting in the family beside it. Read the grade before quoting the number.
+- **`compare` scores only what both sides measured**, against loose gates. A `PASS` above a high `UNMEASURED` count means little was checked, not that little was wrong.
+- `analyze` does no stem separation; `separate` is a separate command and needs a multi-gigabyte Demucs and torch install. There is still no plugin chain recovery and no track count, and the prompt forbids inventing them.
 - One file per run, longer than zero seconds and up to 30 minutes. Longer recordings need an excerpt you choose; the script will not trim silently.
 - Lyrics are not transcribed.
 
@@ -115,7 +138,7 @@ If you already own SunoGPT's Brain, `connect-brain` saves a pointer to your loca
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The 13 tests cover credential handling, config validation, doctor output on malformed files, upload and cleanup branches, failure paths that retain measurements, and the finite-value guarantees on the measurement path. They run against mocks and synthetic audio. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
+The 80 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
 
 The release in this repository is the revision its author ran end to end on macOS. The Windows and Linux code paths are written and covered by mocked tests, but have not been exercised on those operating systems.
 
