@@ -19,6 +19,9 @@ import unicodedata
 import uuid
 import warnings
 
+import stems
+import tempo as tempo_mod
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = 'gemini-3.8-flash'
 
@@ -500,6 +503,21 @@ def cmd_delete_style(args):
     p.unlink()
     print('STYLE_DELETED ' + style_slug(args.name) + '. This cannot be undone.')
 
+def cmd_separate(args):
+    out = args.out or (config_dir() / 'cache')
+    paths = stems.separate(args.audio, out)
+    for name in stems.STEM_NAMES:
+        print(f'STEM_{name.upper()}={paths[name]}')
+
+
+def cmd_tempo(args):
+    target = args.audio
+    if args.from_drums:
+        target = stems.separate(args.audio, config_dir() / 'cache')['drums']
+        print(f'TEMPO_SOURCE={target}', file=sys.stderr)
+    result = tempo_mod.tempo_family(target)
+    print(json.dumps(result, indent=2))
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
@@ -511,6 +529,13 @@ def main():
     a.add_argument('--local-only', action='store_true')
     b = sub.add_parser('connect-brain'); b.add_argument('path', type=Path)
     m = sub.add_parser('set-model'); m.add_argument('model')
+    sp = sub.add_parser('separate')
+    sp.add_argument('audio', type=Path)
+    sp.add_argument('--out', type=Path, default=None)
+    tp = sub.add_parser('tempo')
+    tp.add_argument('audio', type=Path)
+    tp.add_argument('--from-drums', action='store_true',
+                    help='Separate first and measure the drums stem. Recommended.')
     sub.add_parser('list-styles')
     s = sub.add_parser('save-style')
     s.add_argument('name')
@@ -552,6 +577,10 @@ def main():
             raise SkillError('Invalid model ID.')
         cfg = config(); cfg['model'] = args.model; cfg['onboarding_complete'] = False
         save_config(cfg); print('MODEL_SAVED. Run verify before use.')
+    elif args.command == 'separate':
+        cmd_separate(args)
+    elif args.command == 'tempo':
+        cmd_tempo(args)
     elif args.command == 'connect-brain':
         root, sources = brain_sources(args.path)
         cfg = config(); cfg['brain_path'] = str(root); save_config(cfg)
