@@ -106,6 +106,24 @@ class CompareTests(unittest.TestCase):
         key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
         self.assertEqual(key_axis['verdict'], 'UNKNOWN')
 
+    def test_identical_unparseable_keys_are_unknown_not_a_pass(self):
+        # A sentinel or garbage value identical on both sides is not evidence
+        # that the key matched. Raw string equality made it an earned PASS and
+        # counted the axis as measured, so a fact sheet carrying 'unknown' on
+        # both sides printed MEASURED=7 UNMEASURED=0 VERDICT=PASS.
+        for value in ('unknown', 'n/a', '', 'banana'):
+            with self.subTest(value=value):
+                result = c.score(dict(REFERENCE, key=value), dict(REFERENCE, key=value))
+                key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
+                self.assertEqual(key_axis['verdict'], 'UNKNOWN')
+                self.assertEqual(result['measured'], 6)
+                self.assertEqual(result['unmeasured'], 1)
+
+    def test_key_verdict_parses_before_declaring_a_match(self):
+        self.assertEqual(c.key_verdict('unknown', 'unknown')[0], 'UNKNOWN')
+        self.assertEqual(c.key_verdict('F# minor', 'F# minor')[0], 'PASS')
+        self.assertEqual(c.key_verdict('Gb minor', 'F# minor')[0], 'PASS')
+
     def test_valid_but_unrelated_key_still_fails(self):
         candidate = dict(REFERENCE, key='D major')
         result = c.score(REFERENCE, candidate)

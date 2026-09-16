@@ -46,14 +46,15 @@ def parse_key(value):
 
 
 def key_verdict(reference, candidate):
-    if reference == candidate:
-        return 'PASS', 'exact match'
+    # Parse before comparing. Raw string equality made any sentinel identical
+    # on both sides ('unknown', '', a placeholder) an earned PASS on an axis
+    # nothing had measured, and score() then counted it among the measured
+    # axes. Equal but unparseable is UNKNOWN; equal and parseable is PASS.
     a, b = parse_key(reference), parse_key(candidate)
     if a is None or b is None:
         return 'UNKNOWN', 'key not parseable'
-    # After parsing, check for exact match (same note and mode after normalization)
     if a == b:
-        return 'PASS', 'exact match after normalization'
+        return 'PASS', 'exact match'
     distance = (b[0] - a[0]) % 12
     if a[1] != b[1] and distance in (RELATIVE_SEMITONES, 12 - RELATIVE_SEMITONES):
         return 'WARN', 'relative major or minor, not the same tonal centre'
