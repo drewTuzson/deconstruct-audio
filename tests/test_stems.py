@@ -61,8 +61,11 @@ class StemTests(unittest.TestCase):
     def test_cache_dir_is_private(self):
         with patch('subprocess.run', self._fake_run(stems.STEM_NAMES)):
             stems.separate(self.audio, self.path)
-        mode = stems.stem_cache_dir(self.audio, self.path).stat().st_mode & 0o777
-        self.assertEqual(mode, 0o700)
+        cache_dir = stems.stem_cache_dir(self.audio, self.path)
+        leaf_mode = cache_dir.stat().st_mode & 0o777
+        self.assertEqual(leaf_mode, 0o700)
+        parent_mode = cache_dir.parent.stat().st_mode & 0o777
+        self.assertEqual(parent_mode, 0o700)
 
 
 if __name__ == '__main__':

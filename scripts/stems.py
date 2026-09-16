@@ -2,7 +2,6 @@
 """Source separation. Caches by source hash so repeat analysis is free."""
 from pathlib import Path
 import hashlib
-import os
 import subprocess
 import sys
 
@@ -38,6 +37,7 @@ def separate(audio, cache_root, model=DEFAULT_MODEL):
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         target.chmod(0o700)
+        target.parent.chmod(0o700)
     except OSError:
         raise SeparationError('Stem cache folder permissions could not be tightened.') from None
     result = subprocess.run(
