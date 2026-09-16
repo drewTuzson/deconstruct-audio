@@ -54,9 +54,29 @@ def config():
         raise SkillError('Invalid config.json settings. Move that settings file aside and rerun onboarding; keep credentials.json private and unchanged.')
     return value
 
-def save_config(value):
-    folder = config_dir()
+def secure_dir(folder, what):
+    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt' and folder.stat().st_mode & 0o077:
+        try:
+            folder.chmod(0o700)
+        except OSError:
+            raise SkillError('The ' + what + ' is readable by other users and its permissions could not be tightened. Run chmod 700 on ' + str(folder) + '.') from None
+    return folder
+
+def secure_config_dir():
+    """The private directory, tightened by whichever command reaches it first.
+
+    mkdir(parents=True, mode=) sets the mode on the leaf only, and no-ops
+    entirely on a directory that already exists. separate creating its stem
+    cache underneath therefore left the folder that later holds
+    credentials.json at 0755 for good, because save_config and set_key hand
+    their mode= to a mkdir that never runs.
+    """
+    return secure_dir(config_dir(), 'configuration directory')
+
+def save_config(value):
+    folder = secure_config_dir()
     target = folder / 'config.json'
     fd, name = tempfile.mkstemp(dir=folder)
     try:
@@ -100,8 +120,7 @@ def set_key():
         value = getpass.getpass('Gemini API key (hidden): ').strip()
     if not value or any(c.isspace() for c in value):
         raise SkillError('Key was empty or contained whitespace. Nothing saved.')
-    folder = config_dir()
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    folder = secure_config_dir()
     fd, name = tempfile.mkstemp(dir=folder)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -371,15 +390,9 @@ def valid_style(value):
     )
 
 def secure_styles_dir():
-    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
-    folder = styles_dir()
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name != 'nt' and folder.stat().st_mode & 0o077:
-        try:
-            folder.chmod(0o700)
-        except OSError:
-            raise SkillError('The saved styles folder is readable by other users and its permissions could not be tightened. Run chmod 700 on that folder.') from None
-    return folder
+    """Secure the parent before the leaf, so neither is left world-readable."""
+    secure_config_dir()
+    return secure_dir(styles_dir(), 'saved styles folder')
 
 def write_style(value):
     """Atomic replace so an interrupted write never truncates a saved style."""
@@ -508,7 +521,7 @@ def cmd_delete_style(args):
 
 def cmd_separate(args):
     import stems
-    out = args.out or (config_dir() / 'cache')
+    out = args.out or (secure_config_dir() / 'cache')
     try:
         paths = stems.separate(args.audio, out)
     except stems.SeparationError as e:
@@ -523,7 +536,7 @@ def cmd_tempo(args):
     target = args.audio
     if args.from_drums:
         try:
-            target = stems.separate(args.audio, config_dir() / 'cache')['drums']
+            target = stems.separate(args.audio, secure_config_dir() / 'cache')['drums']
         except stems.SeparationError as e:
             raise SkillError(str(e)) from None
         print(f'TEMPO_SOURCE={target}', file=sys.stderr)
