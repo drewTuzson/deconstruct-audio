@@ -522,6 +522,28 @@ def cmd_delete_style(args):
     p.unlink()
     print('STYLE_DELETED ' + style_slug(args.name) + '. This cannot be undone.')
 
+def read_facts(path, role):
+    """Load one side of a comparison. A fact sheet is a JSON object of axes.
+
+    Every failure here is authored. An unreadable path used to reach the
+    top-level handler as a bare FileNotFoundError and print 'Details
+    suppressed to protect secrets', which tells a user nothing about the
+    typo in their path.
+    """
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        raise SkillError('Cannot read the ' + role + ' fact sheet: ' + str(path)
+                         + '. Supply a readable JSON file of measured axes.') from None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        raise SkillError('The ' + role + ' fact sheet is not valid JSON: ' + str(path) + '.') from None
+    if not isinstance(value, dict):
+        raise SkillError('The ' + role + ' fact sheet must be a JSON object of '
+                         'measured axes: ' + str(path) + '.')
+    return value
+
 def cmd_separate(args):
     import stems
     out = args.out or (secure_config_dir() / 'cache')
@@ -543,13 +565,23 @@ def cmd_tempo(args):
         except stems.SeparationError as e:
             raise SkillError(str(e)) from None
         print(f'TEMPO_SOURCE={target}', file=sys.stderr)
-    result = tempo_mod.tempo_family(target)
+    elif not Path(target).is_file():
+        # Same sentence separate gives, so the three commands fail alike.
+        raise SkillError(f'No such audio file: {target}')
+    try:
+        result = tempo_mod.tempo_family(target)
+    except Exception:
+        # librosa and soundfile decoder errors name virtualenv paths and
+        # library internals. The user gets the one sentence that fixes it.
+        raise SkillError(f'Could not measure tempo from {target}. Supply a '
+                         'decodable audio file, and run doctor if librosa or '
+                         'soundfile is missing.') from None
     print(json.dumps(result, indent=2))
 
 def cmd_compare(args):
     import compare as compare_mod
-    reference = json.loads(args.reference.read_text(encoding='utf-8'))
-    candidate = json.loads(args.candidate.read_text(encoding='utf-8'))
+    reference = read_facts(args.reference, 'reference')
+    candidate = read_facts(args.candidate, 'candidate')
     result = compare_mod.score(reference, candidate)
     for axis in result['axes']:
         print(f'{axis["verdict"]:<8}{axis["label"]:<18}{axis["note"]}')

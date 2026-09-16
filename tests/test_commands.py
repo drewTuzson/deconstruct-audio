@@ -174,12 +174,49 @@ class ErrorSurfaceTests(unittest.TestCase):
         self.addCleanup(holder.cleanup)
         self.tmp = holder.name
 
+    def assert_authored(self, done, expected):
+        self.assertIn(expected, done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+        self.assertNotIn('site-packages', done.stderr)
+        self.assertNotIn('Warning', done.stderr)
+
     def test_tempo_on_a_missing_file_prints_no_library_warnings(self):
         missing = Path(self.tmp) / 'missing.wav'
         done = self.run_cli('tempo', str(missing))
         self.assertNotIn('Warning', done.stderr)
         self.assertNotIn('site-packages', done.stderr)
         self.assertNotIn('Traceback', done.stderr)
+
+    def test_the_three_commands_name_a_missing_audio_file_the_same_way(self):
+        missing = Path(self.tmp) / 'missing.wav'
+        for command in ('separate', 'tempo'):
+            with self.subTest(command=command):
+                done = self.run_cli(command, str(missing))
+                self.assert_authored(done, f'ERROR: No such audio file: {missing}')
+                self.assertEqual(done.returncode, 1)
+
+    def test_tempo_on_an_undecodable_file_says_so_in_our_own_words(self):
+        text = Path(self.tmp) / 'notes.txt'
+        text.write_text('this is not audio', encoding='utf-8')
+        done = self.run_cli('tempo', str(text))
+        self.assert_authored(done, 'ERROR: Could not measure tempo from')
+        self.assertEqual(done.returncode, 1)
+
+    def test_compare_names_the_side_it_could_not_read(self):
+        missing = Path(self.tmp) / 'nowhere.json'
+        done = self.run_cli('compare', str(missing), str(missing))
+        self.assert_authored(done, 'ERROR: Cannot read the reference fact sheet')
+
+    def test_compare_rejects_malformed_and_non_object_fact_sheets(self):
+        bad = Path(self.tmp) / 'bad.json'
+        bad.write_text('not json at all', encoding='utf-8')
+        self.assert_authored(self.run_cli('compare', str(bad), str(bad)),
+                             'ERROR: The reference fact sheet is not valid JSON')
+        array = Path(self.tmp) / 'array.json'
+        array.write_text('[1, 2, 3]', encoding='utf-8')
+        self.assert_authored(self.run_cli('compare', str(array), str(array)),
+                             'ERROR: The reference fact sheet must be a JSON object')
 
 
 if __name__ == '__main__':
