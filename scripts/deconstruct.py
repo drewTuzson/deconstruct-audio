@@ -578,15 +578,27 @@ def cmd_tempo(args):
                          'soundfile is missing.') from None
     print(json.dumps(result, indent=2))
 
+# compare's exit code carries the verdict, so a wrapping script can gate on it
+# without parsing stdout. 1 stays what it means for every other command: the
+# command itself failed. UNKNOWN is its own code because "nothing was measured
+# on both sides" is a different answer from "it failed", and a gate that
+# conflated them would pass a comparison that never happened.
+COMPARE_EXIT = {'PASS': 0, 'FAIL': 2, 'WARN': 3, 'UNKNOWN': 4}
+
 def cmd_compare(args):
     import compare as compare_mod
     reference = read_facts(args.reference, 'reference')
     candidate = read_facts(args.candidate, 'candidate')
     result = compare_mod.score(reference, candidate)
+    # Echoed because the two positionals are interchangeable at the shell and
+    # a swapped pair still produces a full, plausible, silently inverted report.
+    print(f'REFERENCE={args.reference}')
+    print(f'CANDIDATE={args.candidate}')
     for axis in result['axes']:
         print(f'{axis["verdict"]:<8}{axis["label"]:<18}{axis["note"]}')
     print(f'MEASURED={result["measured"]} UNMEASURED={result["unmeasured"]}')
     print(f'VERDICT={result["verdict"]}')
+    return COMPARE_EXIT.get(result['verdict'], 4)
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -606,9 +618,19 @@ def main():
     tp.add_argument('audio', type=Path)
     tp.add_argument('--from-drums', action='store_true',
                     help='Separate first and measure the drums stem. Recommended.')
-    cp = sub.add_parser('compare')
-    cp.add_argument('reference', type=Path)
-    cp.add_argument('candidate', type=Path)
+    cp = sub.add_parser(
+        'compare',
+        help='Score a candidate track against a reference, on measured axes only.',
+        description='Score a candidate track against a reference fact sheet. Order '
+                    'matters and is not detectable from the files: the reference '
+                    'comes first. Axes missing from either side are reported '
+                    'UNMEASURED rather than scored. Exit code carries the verdict: '
+                    '0 PASS, 2 FAIL, 3 WARN, 4 UNKNOWN (no axis measured on both '
+                    'sides), 1 the command itself failed.')
+    cp.add_argument('reference', type=Path,
+                    help='Fact sheet of the reference track, the one being matched.')
+    cp.add_argument('candidate', type=Path,
+                    help='Fact sheet of the candidate track, the generation being scored.')
     sub.add_parser('list-styles')
     s = sub.add_parser('save-style')
     s.add_argument('name')
@@ -655,7 +677,7 @@ def main():
     elif args.command == 'tempo':
         cmd_tempo(args)
     elif args.command == 'compare':
-        cmd_compare(args)
+        return cmd_compare(args)
     elif args.command == 'connect-brain':
         root, sources = brain_sources(args.path)
         cfg = config(); cfg['brain_path'] = str(root); save_config(cfg)
@@ -691,7 +713,7 @@ if __name__ == '__main__':
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='backslashreplace')
     try:
-        main()
+        sys.exit(main() or 0)
     except KeyboardInterrupt:
         sys.exit('Cancelled. No automatic retry.')
     except Exception as exc:

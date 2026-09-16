@@ -219,5 +219,77 @@ class ErrorSurfaceTests(unittest.TestCase):
                              'ERROR: The reference fact sheet must be a JSON object')
 
 
+REFERENCE_FACTS = {'tempo_bpm': 80.7, 'key': 'F# minor', 'intro_seconds': 12.1,
+                   'lra_lu': 4.1, 'low_end_share': 16.4, 'section_count': 7,
+                   'lead_register_midi': 42}
+
+
+class CompareExitCodeTests(unittest.TestCase):
+    """A wrapping script gates on the exit code. Parsing stdout for VERDICT=
+    was the only way to tell a failing comparison from a passing one, and
+    `compare` exited 0 either way.
+    """
+
+    def setUp(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.tmp = Path(holder.name)
+        self.reference = self.write('reference', REFERENCE_FACTS)
+
+    def write(self, name, facts):
+        path = self.tmp / f'{name}.json'
+        path.write_text(json.dumps(facts), encoding='utf-8')
+        return path
+
+    def compare(self, candidate):
+        env = dict(os.environ)
+        env['DECONSTRUCT_AUDIO_CONFIG_DIR'] = str(self.tmp / 'private')
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / 'deconstruct.py'), 'compare',
+             str(self.reference), str(candidate)],
+            capture_output=True, text=True, timeout=120, env=env)
+
+    def test_the_exit_code_carries_the_verdict(self):
+        cases = {
+            'PASS': (0, dict(REFERENCE_FACTS)),
+            'FAIL': (2, dict(REFERENCE_FACTS, low_end_share=4.9)),
+            'WARN': (3, dict(REFERENCE_FACTS, key='A major')),
+            'UNKNOWN': (4, {}),
+        }
+        for verdict, (code, facts) in cases.items():
+            with self.subTest(verdict=verdict):
+                done = self.compare(self.write(verdict.lower(), facts))
+                self.assertIn(f'VERDICT={verdict}', done.stdout)
+                self.assertEqual(done.returncode, code)
+
+    def test_unknown_stays_distinguishable_from_fail(self):
+        nothing_measured = self.compare(self.write('blank', {}))
+        failing = self.compare(self.write('bad', dict(REFERENCE_FACTS, low_end_share=4.9)))
+        self.assertNotEqual(nothing_measured.returncode, failing.returncode)
+        # And neither collides with the code a command failure uses.
+        self.assertNotIn(1, (nothing_measured.returncode, failing.returncode))
+
+    def test_a_command_failure_still_exits_one(self):
+        done = self.compare(self.tmp / 'nowhere.json')
+        self.assertEqual(done.returncode, 1)
+
+    def test_the_report_names_which_file_was_the_reference(self):
+        # The two positionals are interchangeable at the shell and a swapped
+        # pair still scores every axis, so the report says which was which.
+        done = self.compare(self.write('candidate', dict(REFERENCE_FACTS)))
+        self.assertIn(f'REFERENCE={self.reference}', done.stdout)
+        self.assertIn(f"CANDIDATE={self.tmp / 'candidate.json'}", done.stdout)
+
+    def test_the_help_text_names_both_positionals_and_the_exit_codes(self):
+        done = subprocess.run(
+            [sys.executable, str(SCRIPTS / 'deconstruct.py'), 'compare', '--help'],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn('reference', done.stdout)
+        self.assertIn('candidate', done.stdout)
+        for fragment in ('0 PASS', '2 FAIL', '3 WARN', '4 UNKNOWN'):
+            self.assertIn(fragment, done.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
