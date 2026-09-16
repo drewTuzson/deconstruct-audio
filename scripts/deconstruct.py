@@ -19,8 +19,11 @@ import unicodedata
 import uuid
 import warnings
 
-import stems
-import tempo as tempo_mod
+# stems and tempo are imported inside the commands that need them, never here.
+# tempo pulls in librosa and numpy, so a module-level import would make every
+# command, doctor included, fail at import time on an incomplete install. That
+# is precisely the state doctor exists to diagnose, and the failure would land
+# before the top-level handler, printing a raw traceback with local paths.
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = 'gemini-3.8-flash'
@@ -504,6 +507,7 @@ def cmd_delete_style(args):
     print('STYLE_DELETED ' + style_slug(args.name) + '. This cannot be undone.')
 
 def cmd_separate(args):
+    import stems
     out = args.out or (config_dir() / 'cache')
     try:
         paths = stems.separate(args.audio, out)
@@ -514,6 +518,8 @@ def cmd_separate(args):
 
 
 def cmd_tempo(args):
+    import stems
+    import tempo as tempo_mod
     target = args.audio
     if args.from_drums:
         try:
