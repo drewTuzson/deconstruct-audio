@@ -79,6 +79,37 @@ class FamilyTests(unittest.TestCase):
                         f'120 BPM appears nowhere in {reported}')
         self.assertIn(result['confidence'], ('INFER', 'UNKNOWN'))
 
+    def test_shared_octave_bias_is_surfaced_not_known(self):
+        # At 190 BPM the tempogram peak, beat_track, and ioi all lock onto the
+        # same half-tempo alias (~95.7 BPM) because beat_track and ioi derive
+        # from the same onset envelope as the tempogram. "All methods agree"
+        # must not become KNOW when the tempogram's own secondary-peak
+        # structure still shows meaningful support for the true tempo.
+        wav = self.path / 'fast190.wav'
+        click_track(wav, 190)
+        result = t.tempo_family(wav)
+        reported = [result['primary']] + [entry['bpm'] for entry in result['family']]
+        self.assertTrue(any(abs(bpm - 190.0) / 190.0 < 0.05 for bpm in reported),
+                        f'190 BPM appears nowhere in {reported}')
+        self.assertNotEqual(result['confidence'], 'KNOW')
+
+    def test_grade_downgrades_know_when_tempogram_shows_competing_level(self):
+        # Direct unit test of grade()'s new `competing` parameter: even when
+        # every method in `methods` agrees, a supported competing tempogram
+        # peak must appear in the family and must prevent KNOW.
+        result = t.grade(
+            {'tempogram': 95.7, 'beat_track': 95.7, 'ioi': 95.7},
+            competing=[{'bpm': 190.0, 'ratio': '2x', 'relative_strength': 0.85}])
+        self.assertNotEqual(result['confidence'], 'KNOW')
+        self.assertTrue(any(entry['bpm'] == 190.0 for entry in result['family']))
+
+    def test_grade_without_competing_argument_is_unchanged(self):
+        # Backward compatibility: existing callers that pass only `methods`
+        # (no `competing`) must behave exactly as before this fix.
+        result = t.grade({'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8})
+        self.assertEqual(result['confidence'], 'KNOW')
+        self.assertIsNone(result['disagreement'])
+
 
 if __name__ == '__main__':
     unittest.main()
