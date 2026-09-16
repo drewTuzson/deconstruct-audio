@@ -24,6 +24,20 @@ def click_track(path, bpm, seconds=20, sr=22050):
     sf.write(str(path), y, sr)
 
 
+def tempogram_with(primary, competing=None, relative=0.0,
+                   low=50.0, high=220.0, step=0.5):
+    """Synthetic tempogram evidence for grade(): one strong peak at `primary`,
+    plus an optional second peak at `competing` carrying `relative` of the
+    primary's strength. Everything else is the noise floor.
+    """
+    tempi = np.arange(low, high + step, step)
+    strength = np.zeros_like(tempi)
+    strength[int(np.argmin(np.abs(tempi - primary)))] = 1.0
+    if competing is not None:
+        strength[int(np.argmin(np.abs(tempi - competing)))] = relative
+    return tempi, strength, 1.0
+
+
 class RatioTests(unittest.TestCase):
     def test_classify_known_ratios(self):
         cases = [(80.0, 160.0, '2x'), (80.0, 40.0, '0.5x'),
@@ -57,16 +71,19 @@ class FamilyTests(unittest.TestCase):
         self.assertIn(result['confidence'], ('KNOW', 'INFER', 'UNKNOWN'))
 
     def test_non_octave_disagreement_lowers_confidence(self):
-        result = t.grade({'tempogram': 80.0, 'beat_track': 106.7, 'ioi': 80.2})
+        result = t.grade({'tempogram': 80.0, 'beat_track': 106.7, 'ioi': 80.2},
+                         *tempogram_with(80.0))
         self.assertEqual(result['confidence'], 'INFER')
         self.assertIn('4/3', result['disagreement'])
 
     def test_unrelated_methods_are_unknown_not_a_pick(self):
-        result = t.grade({'tempogram': 80.0, 'beat_track': 97.0, 'ioi': 131.0})
+        result = t.grade({'tempogram': 80.0, 'beat_track': 97.0, 'ioi': 131.0},
+                         *tempogram_with(80.0))
         self.assertEqual(result['confidence'], 'UNKNOWN')
 
     def test_agreeing_methods_are_known(self):
-        result = t.grade({'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8})
+        result = t.grade({'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8},
+                         *tempogram_with(80.0))
         self.assertEqual(result['confidence'], 'KNOW')
         self.assertIsNone(result['disagreement'])
 
@@ -94,21 +111,45 @@ class FamilyTests(unittest.TestCase):
         self.assertNotEqual(result['confidence'], 'KNOW')
 
     def test_grade_downgrades_know_when_tempogram_shows_competing_level(self):
-        # Direct unit test of grade()'s new `competing` parameter: even when
-        # every method in `methods` agrees, a supported competing tempogram
-        # peak must appear in the family and must prevent KNOW.
-        result = t.grade(
-            {'tempogram': 95.7, 'beat_track': 95.7, 'ioi': 95.7},
-            competing=[{'bpm': 190.0, 'ratio': '2x', 'relative_strength': 0.85}])
+        # Even when every method in `methods` agrees, a supported competing
+        # tempogram peak must appear in the family and must prevent KNOW.
+        # grade() finds it from the tempogram itself, not from a caller that
+        # remembered to look.
+        result = t.grade({'tempogram': 95.7, 'beat_track': 95.7, 'ioi': 95.7},
+                         *tempogram_with(95.7, competing=191.4, relative=0.85))
         self.assertNotEqual(result['confidence'], 'KNOW')
-        self.assertTrue(any(entry['bpm'] == 190.0 for entry in result['family']))
+        self.assertTrue(any(abs(entry['bpm'] - 191.4) / 191.4 < 0.01
+                            for entry in result['family']),
+                        f"191.4 BPM missing from {result['family']}")
 
-    def test_grade_without_competing_argument_is_unchanged(self):
-        # Backward compatibility: existing callers that pass only `methods`
-        # (no `competing`) must behave exactly as before this fix.
-        result = t.grade({'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8})
-        self.assertEqual(result['confidence'], 'KNOW')
-        self.assertIsNone(result['disagreement'])
+    def test_grade_has_no_signature_that_skips_the_octave_check(self):
+        # Inverted from a backward-compatibility test that asserted the
+        # opt-in path still worked. That test was the thing standing in the
+        # way of this fix: its name told a maintainer that grade(methods)
+        # was a supported contract, when it was the shape of the original
+        # Critical bug. Three correlated measurements agreeing on a tempo
+        # wrong by an octave must not be able to reach KNOW by any call.
+        with self.assertRaises(TypeError):
+            t.grade({'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8})
+
+    def test_unusable_tempogram_evidence_cannot_reach_know(self):
+        # Merely requiring the argument would not be enough: a caller
+        # satisfies a required parameter with None or [] just as quietly.
+        agreeing = {'tempogram': 80.0, 'beat_track': 80.5, 'ioi': 79.8}
+        narrow = (np.array([80.0, 80.5]), np.array([1.0, 0.0]), 1.0)
+        cases = {
+            'none': (None, None, 1.0),
+            'empty': ([], [], 1.0),
+            'single point': ([80.0], [1.0], 1.0),
+            'mismatched lengths': ([80.0, 160.0], [1.0], 1.0),
+            'no ratio candidate in range': narrow,
+            'no peak strength': (*tempogram_with(80.0)[:2], 0.0),
+        }
+        for name, evidence in cases.items():
+            with self.subTest(evidence=name):
+                result = t.grade(agreeing, *evidence)
+                self.assertEqual(result['confidence'], 'INFER')
+                self.assertIn('competing-level check', result['disagreement'])
 
 
 if __name__ == '__main__':

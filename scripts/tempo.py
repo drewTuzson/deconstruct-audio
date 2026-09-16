@@ -74,16 +74,56 @@ def competing_peaks(tempi, strength, primary, primary_strength,
     return found
 
 
-def grade(methods, competing=None):
+def ratio_candidates_in_range(tempi, primary):
+    """Non-1x metrical levels of `primary` this tempogram could actually show.
+
+    "No competing level was found" and "no competing level could be looked
+    for" are different answers, and only the first one earns KNOW.
+    """
+    if primary <= 0 or tempi.size == 0:
+        return []
+    low, high = float(tempi.min()), float(tempi.max())
+    return [label for value, label in RATIOS
+            if label != '1x' and low <= primary * value <= high]
+
+
+def usable_tempogram(tempi, strength, primary, primary_strength):
+    """Whether the supplied evidence can carry a competing-level check."""
+    return bool(
+        primary > 0 and primary_strength > 0
+        and tempi.size >= 2 and strength.size == tempi.size
+        and np.all(np.isfinite(tempi)) and np.all(np.isfinite(strength))
+        and float(tempi.max()) > float(tempi.min())
+        and ratio_candidates_in_range(tempi, primary))
+
+
+def grade(methods, tempi, strength, primary_strength):
     """Turn per-method estimates into a family with an honest confidence.
 
-    `competing` is optional tempogram evidence (see `competing_peaks`) for a
-    metrical level none of `methods` disagrees about but that the tempogram's
-    own shape still supports. Its presence must not be silently absorbed into
-    KNOW just because beat_track and ioi, which share the tempogram's onset
-    envelope, happened to inherit the same bias.
+    The tempogram evidence is required and `grade` runs `competing_peaks`
+    itself, so no signature exists that grades `methods` without also checking
+    the metrical level they may all have inherited together. `beat_track` and
+    `ioi` derive from the same onset envelope as the tempogram, so their
+    agreement is not independent corroboration: an octave bias in the envelope
+    shows up in all three at once, and the tempogram's own secondary-peak
+    structure is the one place it stays visible.
+
+    Requiring the argument would not be enough on its own, because a caller
+    satisfies a required parameter with None or an empty list just as quietly.
+    Evidence that cannot support the check therefore does not fall back to the
+    unprotected path; it caps confidence at INFER.
     """
     primary = methods['tempogram']
+    try:
+        tempi = np.asarray(tempi, dtype=float).ravel()
+        strength = np.asarray(strength, dtype=float).ravel()
+        primary_strength = float(primary_strength)
+    except (TypeError, ValueError):
+        tempi = strength = np.zeros(0, dtype=float)
+        primary_strength = 0.0
+    checked = usable_tempogram(tempi, strength, primary, primary_strength)
+    competing = (competing_peaks(tempi, strength, primary, primary_strength)
+                 if checked else [])
     family, unrelated, ratios = [], [], []
     for name, bpm in methods.items():
         if name == 'tempogram':
@@ -122,6 +162,11 @@ def grade(methods, competing=None):
         disagreement = ('Methods agree but the tempogram shows a competing '
                         'metrical level with meaningful support: '
                         + '; '.join(competing_notes))
+    elif not checked:
+        confidence = 'INFER'
+        disagreement = ('Methods agree, but the supplied tempogram cannot carry '
+                        'a competing-level check, so an octave or subdivision '
+                        'error shared by every method cannot be ruled out.')
     else:
         confidence = 'KNOW'
         disagreement = None
@@ -148,8 +193,7 @@ def tempo_family(audio):
     methods = {'tempogram': peak, 'beat_track': float(np.atleast_1d(tracked)[0])}
     if len(times) > 2:
         methods['ioi'] = float(60.0 / np.median(np.diff(times)))
-    competing = competing_peaks(u_tempi, u_strength, peak, peak_strength)
-    return grade(methods, competing=competing)
+    return grade(methods, u_tempi, u_strength, peak_strength)
 
 
 if __name__ == '__main__':
