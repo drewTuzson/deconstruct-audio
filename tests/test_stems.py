@@ -188,6 +188,55 @@ class CorruptCacheTests(unittest.TestCase):
         self.assertIn('vocals', str(ctx.exception))
 
 
+class UnusableInputTests(unittest.TestCase):
+    """Passing a directory reached source_hash and raised an uncaught
+    IsADirectoryError, which escaped as a raw exception type instead of the
+    project's authored-message contract. Unusable inputs are now named before
+    anything is hashed or spawned, and only project-authored text reaches the
+    user: an OS error string would leak system detail through the one channel
+    the project controls.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name).resolve()
+
+    def _cases(self):
+        missing = self.path / 'missing.wav'
+        folder = self.path / 'a_folder'
+        folder.mkdir()
+        empty = self.path / 'empty.wav'
+        empty.write_bytes(b'')
+        cases = [('missing', missing, 'no such audio file'),
+                 ('directory', folder, 'folder'),
+                 ('empty', empty, 'empty')]
+        if os.geteuid() != 0:  # root bypasses read permissions
+            blocked = self.path / 'blocked.wav'
+            blocked.write_bytes(b'RIFF0000WAVEfake')
+            blocked.chmod(0o000)
+            self.addCleanup(blocked.chmod, 0o600)
+            cases.append(('unreadable', blocked, 'read'))
+        return cases
+
+    def test_every_unusable_input_gets_an_authored_message(self):
+        def never(cmd, **kwargs):
+            raise AssertionError('separation was spawned on an unusable input')
+
+        for name, target, expected in self._cases():
+            with self.subTest(input=name):
+                with patch('subprocess.run', never):
+                    with self.assertRaises(stems.SeparationError) as ctx:
+                        stems.separate(target, self.path / 'cache')
+                message = str(ctx.exception)
+                self.assertIn(expected, message.lower())
+                # Never a raw OS error string, never a bare exception class.
+                for leak in ('IsADirectoryError', 'PermissionError', 'OSError',
+                             'Errno', 'errno', 'Traceback'):
+                    self.assertNotIn(leak, message,
+                                     f'{leak!r} leaked into {message!r}')
+
+
 class CommandErrorSurfaceTests(unittest.TestCase):
     """A SeparationError from stems.separate must reach the user with its own
     message via cmd_separate/cmd_tempo, not fall through to deconstruct.py's

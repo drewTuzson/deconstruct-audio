@@ -44,6 +44,45 @@ def usable_stem(path):
     return stat.S_ISREG(info.st_mode) and info.st_size >= MIN_STEM_BYTES
 
 
+def readable_source(audio):
+    """Raise a SeparationError naming why `audio` cannot be separated.
+
+    Every unusable shape is named here, before hashing and before demucs is
+    spawned. A directory used to reach source_hash and raise an uncaught
+    IsADirectoryError, which escaped as a raw exception type rather than the
+    authored sentence every other failure in this module produces.
+
+    The message is always this project's own text. An OS error string carries
+    errno detail and system paths the user never asked about, and the error
+    channel is not the place to leak them, so nothing from the caught
+    exception is interpolated into what the user reads.
+    """
+    audio = Path(audio)
+    try:
+        info = audio.stat()
+    except OSError:
+        # Covers a missing path and a parent directory that cannot be
+        # traversed alike: from here neither is a file we can read.
+        raise SeparationError(f'No such audio file: {audio}') from None
+    if stat.S_ISDIR(info.st_mode):
+        raise SeparationError(
+            f'That path is a folder, not an audio file: {audio}')
+    if not stat.S_ISREG(info.st_mode):
+        raise SeparationError(
+            f'That path is not a regular file, so it cannot be read as '
+            f'audio: {audio}')
+    if info.st_size == 0:
+        raise SeparationError(f'That audio file is empty: {audio}')
+    try:
+        with open(audio, 'rb') as f:
+            f.read(1)
+    except OSError:
+        raise SeparationError(
+            f'That audio file cannot be read. Check its permissions: '
+            f'{audio}') from None
+    return audio
+
+
 def source_hash(audio):
     h = hashlib.sha256()
     with open(audio, 'rb') as f:
@@ -57,10 +96,16 @@ def stem_cache_dir(audio, cache_root):
 
 
 def separate(audio, cache_root, model=DEFAULT_MODEL):
-    audio = Path(audio)
-    if not audio.exists():
-        raise SeparationError(f'No such audio file: {audio}')
-    target = stem_cache_dir(audio, cache_root)
+    audio = readable_source(audio)
+    try:
+        target = stem_cache_dir(audio, cache_root)
+    except OSError:
+        # The file passed every check a moment ago, so reaching here means it
+        # changed underneath us. Still the project's own sentence, never the
+        # OS error's.
+        raise SeparationError(
+            f'That audio file could not be read while hashing it: '
+            f'{audio}') from None
     produced = target / model / audio.stem
     found = {n: produced / f'{n}.wav' for n in STEM_NAMES}
     # Existence is not completeness. An interrupted run, a zero-byte
