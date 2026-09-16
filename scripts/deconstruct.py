@@ -294,10 +294,13 @@ def brain_sources(path):
 def doctor():
     checks = {'python': sys.version.split()[0], 'ffmpeg': bool(shutil.which('ffmpeg')),
               'ffprobe': bool(shutil.which('ffprobe'))}
-    for module in ('numpy', 'librosa', 'soundfile', 'google.genai'):
+    # demucs and torch are the separation dependencies this skill added, and a
+    # missing demucs is the dominant first-run failure: it is a multi-gigabyte
+    # install that separate, and tempo --from-drums through it, both need.
+    for module in ('numpy', 'librosa', 'soundfile', 'google.genai', 'demucs', 'torch'):
         try:
             checks[module] = importlib.util.find_spec(module) is not None
-        except ModuleNotFoundError:
+        except (ImportError, ValueError):
             checks[module] = False
     try:
         checks['key_present_not_verified'] = bool(api_key())

@@ -85,6 +85,23 @@ class BrokenInstallTests(unittest.TestCase):
         self.assertFalse(checks['numpy'])
         self.assertIn('python', checks)
 
+    def test_doctor_reports_the_separation_dependencies(self):
+        # "demucs not installed" is the dominant first-run failure for this
+        # branch's separate command, and doctor could not see it.
+        with tempfile.TemporaryDirectory() as tmp:
+            done = self._run('''
+                import runpy
+                sys.argv = ['deconstruct.py', 'doctor']
+                runpy.run_path({script!r}, run_name='__main__')
+            '''.format(script=str(SCRIPTS / 'deconstruct.py')),
+                env={'DECONSTRUCT_AUDIO_CONFIG_DIR': str(Path(tmp) / 'private')})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        checks = json.loads(done.stdout)
+        self.assertIn('demucs', checks)
+        self.assertIn('torch', checks)
+        self.assertFalse(checks['demucs'])
+        self.assertFalse(checks['torch'])
+
 
 @unittest.skipIf(os.name == 'nt', 'POSIX permission bits')
 class ConfigDirPermissionTests(unittest.TestCase):
