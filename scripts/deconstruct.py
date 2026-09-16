@@ -505,7 +505,10 @@ def cmd_delete_style(args):
 
 def cmd_separate(args):
     out = args.out or (config_dir() / 'cache')
-    paths = stems.separate(args.audio, out)
+    try:
+        paths = stems.separate(args.audio, out)
+    except stems.SeparationError as e:
+        raise SkillError(str(e)) from None
     for name in stems.STEM_NAMES:
         print(f'STEM_{name.upper()}={paths[name]}')
 
@@ -513,7 +516,10 @@ def cmd_separate(args):
 def cmd_tempo(args):
     target = args.audio
     if args.from_drums:
-        target = stems.separate(args.audio, config_dir() / 'cache')['drums']
+        try:
+            target = stems.separate(args.audio, config_dir() / 'cache')['drums']
+        except stems.SeparationError as e:
+            raise SkillError(str(e)) from None
         print(f'TEMPO_SOURCE={target}', file=sys.stderr)
     result = tempo_mod.tempo_family(target)
     print(json.dumps(result, indent=2))
