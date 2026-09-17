@@ -107,6 +107,21 @@ class ClaimTests(unittest.TestCase):
         with self.assertRaises(r.ResearchError):
             r.record('', '', [])
 
+    def test_record_refuses_a_sourceless_claim_that_bypassed_claim(self):
+        # record() accepting what claim() refuses would be a second door into
+        # the same room. Today's only caller routes through claim(), but that
+        # is a property of the caller, not of this function.
+        raw = {'axis': 'era', 'value': '2020s', 'source': '  ',
+               'confidence': 'KNOW', 'note': None}
+        with self.assertRaises(r.ResearchError):
+            r.record('An Artist', 'A Song', [raw])
+
+    def test_record_refuses_an_unrecognised_grade_that_bypassed_claim(self):
+        raw = {'axis': 'era', 'value': '2020s', 'source': 'https://example.org',
+               'confidence': 'CERTAIN', 'note': None}
+        with self.assertRaises(r.ResearchError):
+            r.record('An Artist', 'A Song', [raw])
+
 
 if __name__ == '__main__':
     unittest.main()
@@ -132,7 +147,9 @@ replaced: a confident sentence standing in for a number. So filling a gap is
 not expressible in this module. The two sources meet in one place, the
 collision table, and the measurement wins there by construction.
 """
+import copy
 import datetime as _dt
+import math
 
 SCHEMA = 'deconstruct-audio/research/1'
 CONFIDENCE = ('KNOW', 'INFER', 'GUESS')
@@ -166,6 +183,17 @@ def record(artist, title, claims):
         for key in ('axis', 'value', 'source', 'confidence'):
             if key not in entry:
                 raise ResearchError(f'a claim is missing {key}')
+        # The same line claim() holds. record() accepting a blank source while
+        # claim() refuses one is a second door into the same room, and the fact
+        # that today's only caller happens to go through claim() is not a
+        # property of this function.
+        if not str(entry.get('source') or '').strip():
+            raise ResearchError(
+                f'the claim about {entry["axis"]!r} carries no source')
+        if entry.get('confidence') not in CONFIDENCE:
+            raise ResearchError(
+                f'the claim about {entry["axis"]!r} is graded '
+                f'{entry.get("confidence")!r}, which is not one of {CONFIDENCE}')
     return {
         'schema': SCHEMA,
         'generated_at': _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
@@ -178,7 +206,7 @@ def record(artist, title, claims):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_research -v`
-Expected: PASS, 6 tests
+Expected: PASS, 8 tests
 
 - [ ] **Step 5: Commit**
 
@@ -242,6 +270,47 @@ class CollisionTests(unittest.TestCase):
         self.assertEqual(row['authoritative'], 'measured')
         self.assertIsNone(row['measured'])
 
+    def test_a_claim_under_the_projected_axis_name_still_collides(self):
+        # The agent gathering research reads scorable.json, which uses
+        # compare's names, so it files claims as tempo_bpm rather than tempo.
+        # Matching on the sheet's names alone let those four claims escape the
+        # table and be relabelled as safe context, which inverts this file's
+        # entire purpose.
+        rec = self._rec(r.claim('tempo_bpm', 144, 'https://example.org/a', 'GUESS'))
+        row = next(x for x in r.collisions(SHEET, rec) if x['axis'] == 'tempo_bpm')
+        self.assertEqual(row['fact_axis'], 'tempo')
+        self.assertEqual(row['measured'], 80.7)
+        self.assertFalse(row['agrees'])
+        self.assertEqual(row['authoritative'], 'measured')
+
+    def test_a_claim_on_a_nested_field_collides_with_that_field(self):
+        sheet = {'facts': {'loudness': {
+            'value': {'integrated_lufs': -7.0, 'lra_lu': 4.1,
+                      'true_peak_dbtp': -0.2},
+            'confidence': 'KNOW'}}}
+        rec = self._rec(r.claim('lra_lu', 9.0, 'https://example.org/b', 'GUESS'))
+        row = next(x for x in r.collisions(sheet, rec) if x['axis'] == 'lra_lu')
+        self.assertEqual(row['measured'], 4.1)
+        self.assertFalse(row['agrees'])
+
+    def test_a_row_does_not_alias_the_sheet(self):
+        # collisions() never mutates, so the deepcopy-the-input test cannot
+        # catch this. The danger is the caller: a row holding a reference to
+        # the sheet's own value lets anyone editing a row edit the facts.
+        sheet = {'facts': {'loudness': {
+            'value': {'lra_lu': 4.1}, 'confidence': 'KNOW'}}}
+        rec = self._rec(r.claim('loudness', {'lra_lu': 9.0},
+                                'https://example.org/c', 'GUESS'))
+        row = r.collisions(sheet, rec)[0]
+        self.assertIsNot(row['measured'], sheet['facts']['loudness']['value'])
+        row['measured']['lra_lu'] = 999
+        self.assertEqual(sheet['facts']['loudness']['value']['lra_lu'], 4.1)
+
+    def test_an_enormous_number_is_a_disagreement_not_a_crash(self):
+        rec = self._rec(r.claim('tempo', 10 ** 400, 'https://example.org/d', 'GUESS'))
+        row = next(x for x in r.collisions(SHEET, rec) if x['axis'] == 'tempo')
+        self.assertFalse(row['agrees'])
+
     def test_a_claim_on_an_axis_nothing_measured_is_context_not_a_collision(self):
         rec = self._rec(r.claim('scene', 'midwest emo revival',
                                 'https://example.org/d', 'INFER'))
@@ -283,15 +352,78 @@ NUMERIC_TOLERANCE = 0.02   # 2 percent, the same band tempo drift is judged on
 
 
 def _agrees(measured, researched):
+    """Whether a claim and a measurement say the same thing.
+
+    Wrapped in its own guard because the inputs are hand written JSON. A big
+    enough integer literal raises OverflowError on the subtraction, which the
+    CLI's top level handler turns into 'Details suppressed to protect secrets'
+    for what is a typo in a claims file.
+    """
     if measured is None:
         return False
     if isinstance(measured, bool) or isinstance(researched, bool):
         return measured == researched
     if isinstance(measured, (int, float)) and isinstance(researched, (int, float)):
-        if measured == 0:
-            return researched == 0
-        return abs(researched - measured) / abs(measured) <= NUMERIC_TOLERANCE
+        try:
+            a, b = float(measured), float(researched)
+        except (OverflowError, ValueError):
+            return False
+        if not (math.isfinite(a) and math.isfinite(b)):
+            return False
+        if a == 0:
+            return b == 0
+        return abs(b - a) / abs(a) <= NUMERIC_TOLERANCE
     return str(measured).strip().lower() == str(researched).strip().lower()
+
+
+# This project has TWO names for the same measurement. The fact sheet calls it
+# `tempo`; `compare` and `scorable.json` call it `tempo_bpm`. An agent gathering
+# research reads scorable.json, so it files its claims under the second set.
+#
+# Matching on the sheet's names alone means a claim filed as `tempo_bpm: 144`
+# finds no fact, is treated as an axis nothing measured, and is printed under
+# the heading "Usable for what no measurement covers". The collision is never
+# detected and the claim is relabelled as the one kind that is safe to use.
+# Verified against a real sheet: tempo_bpm, lra_lu, low_end_share and
+# lead_register_midi all escaped, and those four are exactly the projected set.
+#
+# So the alias table is not a convenience. It is the difference between the
+# collision table working and inverting.
+ALIASES = {
+    'tempo_bpm': ('tempo', None),
+    'key': ('key', None),
+    'tuning': ('tuning', None),
+    'intro_seconds': ('intro_seconds', None),
+    'section_count': ('section_count', None),
+    'lra_lu': ('loudness', 'lra_lu'),
+    'integrated_lufs': ('loudness', 'integrated_lufs'),
+    'true_peak_dbtp': ('loudness', 'true_peak_dbtp'),
+    'low_end_share': ('spectral_balance', 'low_end_share'),
+    'air_share': ('spectral_balance', 'air_share'),
+    'centroid_hz': ('spectral_balance', 'centroid_hz'),
+    'lead_register_midi': ('lead_register', 'median_midi'),
+    'vocal_register_midi': ('vocal_register', 'median_midi'),
+    'bpm': ('tempo', None),
+    'beats_per_bar': ('meter', None),
+}
+
+
+def resolve_axis(sheet, axis):
+    """The measured value a claim's axis name refers to, under either scheme.
+
+    Returns (fact_axis, value, confidence) or None when nothing measured it.
+    """
+    facts = (sheet or {}).get('facts', {})
+    fact_axis, field = ALIASES.get(axis, (axis, None))
+    entry = facts.get(fact_axis)
+    if entry is None:
+        return None
+    value = entry.get('value')
+    if field is not None:
+        if not isinstance(value, dict) or field not in value:
+            return None
+        value = value[field]
+    return fact_axis, value, entry.get('confidence')
 
 
 def collisions(sheet, rec):
@@ -301,18 +433,22 @@ def collisions(sheet, rec):
     No input to this function makes research win, and a reader can confirm
     that by looking rather than by tracing a branch.
     """
-    facts = (sheet or {}).get('facts', {})
     rows = []
     for entry in rec.get('claims', []):
-        axis = entry['axis']
-        if axis not in facts:
+        resolved = resolve_axis(sheet, entry['axis'])
+        if resolved is None:
             continue
-        measured = facts[axis].get('value')
+        fact_axis, measured, confidence = resolved
         rows.append({
-            'axis': axis,
-            'measured': measured,
-            'measured_confidence': facts[axis].get('confidence'),
-            'researched': entry['value'],
+            'axis': entry['axis'],
+            'fact_axis': fact_axis,
+            # A copy. The row must not alias the sheet's own mutable value: a
+            # caller editing a row would otherwise edit the fact sheet through
+            # it. The no-mutation test uses deepcopy on the INPUT and cannot
+            # catch that, because collisions() never mutates anything itself.
+            'measured': copy.deepcopy(measured),
+            'measured_confidence': confidence,
+            'researched': copy.deepcopy(entry['value']),
             'researched_confidence': entry['confidence'],
             'source': entry['source'],
             'agrees': _agrees(measured, entry['value']),
@@ -332,18 +468,17 @@ def render_markdown(sheet, rec):
     rows = collisions(sheet, rec)
     if rows:
         lines += ['## Collisions', '',
-                  '| Axis | Measured | Grade | Researched | Grade | Agrees | Authoritative | Source |',
-                  '|---|---|---|---|---|---|---|---|']
+                  '| Claim axis | Fact axis | Measured | Grade | Researched | Grade | Agrees | Authoritative | Source |',
+                  '|---|---|---|---|---|---|---|---|---|']
         for row in rows:
             lines.append(
-                f'| {row["axis"]} | {row["measured"]} | '
+                f'| {row["axis"]} | {row["fact_axis"]} | {row["measured"]} | '
                 f'{row["measured_confidence"]} | {row["researched"]} | '
                 f'{row["researched_confidence"]} | '
                 f'{"yes" if row["agrees"] else "no"} | {row["authoritative"]} | '
                 f'{row["source"]} |')
         lines.append('')
-    context = [c for c in rec['claims']
-               if c['axis'] not in (sheet or {}).get('facts', {})]
+    context = [c for c in rec['claims'] if resolve_axis(sheet, c['axis']) is None]
     if context:
         lines += ['## Context', '',
                   'Claims on axes nothing measured. Usable for what no',
@@ -360,7 +495,7 @@ def render_markdown(sheet, rec):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_research -v`
-Expected: PASS, 13 tests
+Expected: PASS, 19 tests
 
 - [ ] **Step 5: Commit**
 
@@ -399,7 +534,11 @@ Above `def main():` in `scripts/deconstruct.py`:
 ```python
 def cmd_research(args):
     import research as research_mod
-    sheet = json.loads(args.facts.read_text(encoding='utf-8'))
+    # read_facts, not json.loads. A mistyped path through a bare json.loads
+    # reaches the user as 'ERROR: FileNotFoundError ... Details suppressed to
+    # protect secrets', which is the failure read_facts exists to stop. The
+    # MIDI command shipped with the same defect and fixed it in 8d2a02b.
+    sheet = read_facts(args.facts, 'facts')
     raw = []
     if args.claims:
         raw = json.loads(args.claims.read_text(encoding='utf-8'))
