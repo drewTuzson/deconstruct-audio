@@ -185,3 +185,108 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
             'skipped_hz': skipped or None, 'candidates': candidates,
             'strongest_support_tuning': strongest['tuning'],
             'strongest_support': strongest['support']}
+
+
+THIRD_RATIO = 0.55   # a third must reach this share of the root's chroma to count
+FIFTH_RATIO = 0.35
+# The value a root with no runner up reports. Finite and large, because None
+# would serialise as null and the MIDI emitter reads a missing margin as no
+# confidence, which is the exact opposite of what an unbeatable root means.
+MARGIN_CAP = 99.0
+BEATS_PER_BAR = 4
+
+
+def _bar_windows(beat_times, beats_per_bar=BEATS_PER_BAR, bars_per_chord=1):
+    beat_times = np.asarray(beat_times, dtype=float)
+    if len(beat_times) < 2:
+        return []
+    step = beats_per_bar * bars_per_chord
+    edges = list(beat_times[::step])
+    if edges[-1] < beat_times[-1]:
+        edges.append(float(beat_times[-1]))
+    return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)
+            if edges[i + 1] > edges[i]]
+
+
+def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
+                   low=150, high=2500):
+    """One chord per bar window, with the third reported rather than assumed."""
+    windows = _bar_windows(beat_times, bars_per_chord=bars_per_chord)
+    if not windows:
+        return []
+    summed = _summed(signals)
+    if summed is None:
+        return []
+    y = band_limit(summed, sr, low, high)
+    if np.max(np.abs(y)) < SILENCE:
+        return []
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    times = librosa.frames_to_time(np.arange(chroma.shape[1]), sr=sr)
+    out = []
+    for start, end in windows:
+        mask = (times >= start) & (times < end)
+        if not mask.any():
+            continue
+        profile = chroma[:, mask].mean(axis=1)
+        total = float(profile.sum())
+        if total <= 0:
+            continue
+        profile = profile / total
+        root = int(np.argmax(profile))
+        root_energy = float(profile[root])
+        if root_energy <= 0:
+            continue
+        major_third = float(profile[(root + 4) % 12]) / root_energy
+        minor_third = float(profile[(root + 3) % 12]) / root_energy
+        fifth = float(profile[(root + 7) % 12]) / root_energy
+        if max(major_third, minor_third) >= THIRD_RATIO:
+            quality = 'major' if major_third >= minor_third else 'minor'
+            third_present = True
+        else:
+            quality = 'power'
+            third_present = False
+        # root_share is the root's share of a normalised 12 bin chroma, whose
+        # floor is 0.083 by construction, so it is not a confidence and must
+        # not be used as one. root_margin is: how far the winner beat the
+        # runner up. A bar where two pitch classes tie has margin near 1.0
+        # however healthy its share looks.
+        ordered = np.sort(profile)[::-1]
+        second = float(ordered[1]) if len(ordered) > 1 else 0.0
+        # Capped, never None and never inf. An unbeatable root is the most
+        # confident reading there is, and emitting None for it collides head on
+        # with the MIDI emitter, which reads a missing margin as no confidence
+        # and replaces the chord with a sustained root. The two would have meant
+        # exact opposites through the same field.
+        margin = (root_energy / second) if second > 0 else MARGIN_CAP
+        out.append({'start_s': round(float(start), 3),
+                    'end_s': round(float(end), 3),
+                    'root': NOTES[root], 'quality': quality,
+                    'root_share': round(root_energy, 4),
+                    'root_margin': round(min(float(margin), MARGIN_CAP), 3),
+                    'third_present': third_present,
+                    'fifth_present': bool(fifth >= FIFTH_RATIO)})
+    return out
+
+
+def harmonic_rhythm(sequence):
+    """How often the chord actually changes, in bars.
+
+    Three labels, not four. A run length is an integer of at least 1, so a
+    median below 1 is impossible and any label defined by that range can never
+    fire. Revision 1 had one.
+    """
+    if not sequence:
+        return {'chords_per_bar': None, 'median_chord_bars': None, 'label': None}
+    runs, current = [], 1
+    for previous, entry in zip(sequence, sequence[1:]):
+        if (previous['root'] == entry['root']
+                and previous['quality'] == entry['quality']):
+            current += 1
+        else:
+            runs.append(current)
+            current = 1
+    runs.append(current)
+    median = float(np.median(runs))
+    label = 'static' if median >= 4 else ('slow' if median >= 2 else 'fast')
+    return {'chords_per_bar': round(1.0 / median, 3),
+            'median_chord_bars': round(median, 2), 'label': label}

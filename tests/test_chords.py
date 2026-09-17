@@ -140,5 +140,66 @@ class TuningTests(unittest.TestCase):
                                 c.SUPPORT_FLOOR)
 
 
+class ChordSequenceTests(unittest.TestCase):
+    def _beats(self, count, period=0.5):
+        return np.arange(count) * period
+
+    def test_it_reads_a_minor_triad_as_minor(self):
+        y = chord((220.0, 261.6, 329.6), 4.0)
+        seq = c.chord_sequence([y], SR, self._beats(8))
+        self.assertTrue(seq)
+        self.assertEqual(seq[0]['root'], 'A')
+        self.assertEqual(seq[0]['quality'], 'minor')
+        self.assertTrue(seq[0]['third_present'])
+
+    def test_it_reads_a_root_and_fifth_as_power_not_as_a_guessed_third(self):
+        y = chord((220.0, 329.6), 4.0)
+        seq = c.chord_sequence([y], SR, self._beats(8))
+        self.assertEqual(seq[0]['root'], 'A')
+        self.assertEqual(seq[0]['quality'], 'power')
+        self.assertFalse(seq[0]['third_present'])
+
+    def test_a_held_chord_reports_a_static_harmonic_rhythm(self):
+        y = chord((220.0, 261.6, 329.6), 8.0)
+        seq = c.chord_sequence([y], SR, self._beats(16))
+        self.assertEqual(c.harmonic_rhythm(seq)['label'], 'static')
+
+    def test_a_chord_per_bar_reports_a_fast_harmonic_rhythm(self):
+        y = np.concatenate([chord((220.0, 261.6, 329.6), 2.0),
+                            chord((246.9, 293.7, 370.0), 2.0),
+                            chord((164.8, 207.7, 246.9), 2.0),
+                            chord((185.0, 220.0, 277.2), 2.0)])
+        seq = c.chord_sequence([y], SR, self._beats(16))
+        self.assertGreater(len(seq), 1)
+        self.assertEqual(c.harmonic_rhythm(seq)['label'], 'fast')
+
+    def test_every_label_is_reachable(self):
+        # Revision 1 had four labels and 'fast' could never fire, because a run
+        # length is an integer of at least 1 so the median was always at least
+        # 1 and the 'moderate' branch always won first. Three labels, each with
+        # a run length that produces it.
+        def seq(runs):
+            out, tick = [], 0
+            for index, length in enumerate(runs):
+                for _ in range(length):
+                    out.append({'start_s': float(tick), 'end_s': float(tick + 1),
+                                'root': c.NOTES[index % 12], 'quality': 'power',
+                                'root_share': 0.3, 'root_margin': 1.5,
+                                'third_present': False,
+                                'fifth_present': True})
+                    tick += 1
+            return out
+        self.assertEqual(c.harmonic_rhythm(seq([1, 1, 1, 1]))['label'], 'fast')
+        self.assertEqual(c.harmonic_rhythm(seq([2, 2, 2]))['label'], 'slow')
+        self.assertEqual(c.harmonic_rhythm(seq([4, 4]))['label'], 'static')
+
+    def test_no_beats_yields_no_sequence_rather_than_a_guess(self):
+        self.assertEqual(c.chord_sequence([tone(220.0, 2.0)], SR,
+                                          np.array([])), [])
+
+    def test_harmonic_rhythm_of_an_empty_sequence_is_unknown(self):
+        self.assertIsNone(c.harmonic_rhythm([])['label'])
+
+
 if __name__ == '__main__':
     unittest.main()
