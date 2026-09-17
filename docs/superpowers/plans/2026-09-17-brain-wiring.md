@@ -698,6 +698,20 @@ class ValidatorTests(unittest.TestCase):
                              filled=filled, acknowledged=True)
         self.assertEqual(check(results, 'ask_first')['verdict'], 'PASS')
 
+    def test_the_parser_default_matches_the_module(self):
+        # deconstruct.py repeats this literal because it cannot import brain at
+        # the top. The repetition is fine; silent drift is not.
+        import argparse
+        import deconstruct
+        parser = [a for a in deconstruct.main.__code__.co_consts
+                  if isinstance(a, str) and a == b.HOLD_OUT_DEFAULT]
+        self.assertTrue(parser,
+                        'deconstruct.py no longer carries brain.HOLD_OUT_DEFAULT '
+                        'as its --hold-out default')
+
+    def test_the_default_control_is_one_of_the_choices(self):
+        self.assertIn(b.HOLD_OUT_DEFAULT, b.HOLD_OUT_CHOICES)
+
     def test_a_held_out_axis_leaves_no_trace_in_the_slots(self):
         held = b.slots(FULL_SHEET, hold_out='lead_register')
         self.assertEqual(held['held_out'], 'lead_register')
@@ -1003,7 +1017,16 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
     # is zero and no drop is ever justified. It becomes positive the day a
     # richer sheet genuinely does not fit, which is the case the flag exists
     # for.
-    slot_chars = sum(len(p) for key in SLOT_KEYS for p in filled.get(key, []))
+    # The joining overhead counts. Phrases do not appear in a style bare: tags
+    # are joined with ', ' and sentences with '. ', and leaving that out made
+    # the overflow branch arithmetically unsatisfiable. provenance forbade
+    # dropping more than slot_chars minus cap, leaving exactly cap characters
+    # that must appear, while budget capped the finished style at cap, and the
+    # separators fell in the gap between the two. It cannot fire on this
+    # pipeline, where the slots total about 311 characters against a cap of
+    # 1000, but a branch that can never be satisfied is not a branch.
+    phrases = [p for key in SLOT_KEYS for p in filled.get(key, [])]
+    slot_chars = sum(len(p) for p in phrases) + max(0, len(phrases) - 1) * 2
     dropped_chars = sum(len(d) for d in dropped)
     if cap is UNREADABLE or cap is None:
         allowance = None
@@ -1086,7 +1109,7 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 47 tests
+Expected: PASS, 49 tests
 
 If `test_a_clean_style_passes_every_check_it_can_run` fails, read which check
 failed and fix the validator, not the fixture, unless the fixture genuinely
@@ -1248,7 +1271,19 @@ def _usable(sheet, axis):
     return entry
 
 
+# The default control axis for the exit bar.
+#
+# A module level constant that nothing references is not a default, it is a
+# comment, and this one was exactly that for two revisions while both the plan
+# and the pre spend checklist said the default was lead_register.
+#
+# `deconstruct.py` cannot import this module at the top to read it, because of
+# the lazy import rule at deconstruct.py:22, so its parser repeats the literal
+# and a test asserts the two agree. A repeated literal with a test on it is
+# honest duplication; a constant nothing reads is not.
 HOLD_OUT_DEFAULT = 'lead_register'
+HOLD_OUT_CHOICES = ('tempo', 'tuning', 'intro_seconds', 'lead_register',
+                    'spectral_balance')
 
 
 def slots(sheet, hold_out=None):
@@ -1410,7 +1445,7 @@ missing.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 58 tests
+Expected: PASS, 60 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1474,15 +1509,23 @@ def cmd_prompt(args):
         raise SkillError(str(exc)) from None
     text = sources.get('SYSTEM-PROMPT-FULL.txt') or sources['INSTRUCTIONS.txt']
     rules = brain_mod.extract_rules(text)
-    filled = brain_mod.slots(sheet, hold_out=args.hold_out)
+    # Resolved BEFORE slots.json is written, which is the order that stops an
+    # axis being held out after someone has seen which one turned out
+    # inconvenient.
+    hold_out = None if args.hold_out == 'none' else args.hold_out
+    filled = brain_mod.slots(sheet, hold_out=hold_out)
 
     out = args.out or args.facts.parent
     out.mkdir(parents=True, exist_ok=True)
     (out / 'slots.json').write_text(
         json.dumps(filled, indent=2, allow_nan=False), encoding='utf-8')
     print(f'SLOTS_WRITTEN={out / "slots.json"}')
-    if filled.get('held_out'):
-        print(f'HELD_OUT={filled["held_out"]}')
+    # Printed unconditionally. Guarding it meant a run with no control emitted
+    # no line at all, and the absence of the control was indistinguishable from
+    # the line having scrolled past. The control is the single thing that turns
+    # a matching generation into evidence rather than a coincidence, so its
+    # absence has to be as loud as its presence.
+    print(f'HELD_OUT={filled.get("held_out") or "none"}')
     for rule in rules['unreadable']:
         print(f'RULE_UNREADABLE={rule}', file=sys.stderr)
     if filled['unusable']:
@@ -1532,11 +1575,17 @@ With the other parsers in `main()`:
     pp.add_argument('--exclude', type=Path, default=None)
     pp.add_argument('--name', action='append', default=[],
                     help='A name that must not appear. Repeatable.')
-    pp.add_argument('--hold-out', default=None,
+    # 'lead_register' repeats brain.HOLD_OUT_DEFAULT, and
+    # test_the_parser_default_matches_the_module agrees they match. It is
+    # repeated rather than imported because deconstruct.py must survive an
+    # incomplete install for doctor's sake; see the comment at line 22.
+    pp.add_argument('--hold-out', default='lead_register',
                     choices=('tempo', 'tuning', 'intro_seconds',
-                             'lead_register', 'spectral_balance'),
+                             'lead_register', 'spectral_balance', 'none'),
                     help='Keep one measured axis OUT of the prompt and score '
-                         'it anyway. The control for the exit bar.')
+                         'it anyway. The control for the exit bar. Defaults to '
+                         'lead_register; pass none to run without a control, '
+                         'which is a weaker result at the same price.')
     pp.add_argument('--acknowledge', action='store_true',
                     help='The user has answered every ASK_FIRST question.')
     pp.add_argument('--added', action='append', default=[],
@@ -1735,7 +1784,18 @@ The generation costs the user money, so these come first, in this order.
    character split, `N characters measured against M declared`. Nothing
    enforces a ratio there and nothing should, because any threshold would be
    invented, but it is the number that tells you how much of the prompt was
-   judgement. A prompt carrying every measurement and six hundred characters of
+   judgement. Read it aloud when you ask for the spend: disclosure instead of a
+   threshold only works if the disclosure is spoken at the moment of the
+   decision.
+
+   What would earn a threshold later, so this reads as deferred rather than
+   forgotten: once several generations exist, each carries a labelled outcome
+   from the five row table above. Ask whether the ratio predicts the first row.
+   Until then there is nothing to set a number from, which is the same reason
+   every constant this project got wrong was wrong. Characters are also a poor
+   proxy on their own: the two direction sentences are 198 of 311 slot
+   characters, so a prompt carrying two of seven phrases can read as 64 percent
+   measured. The line prints the count and the weight for that reason. A prompt carrying every measurement and six hundred characters of
    its own prose passes every check honestly and is still mostly the agent's
    taste. The held out axis is the control; this line is the context you read
    it in.
