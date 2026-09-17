@@ -636,22 +636,38 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(entry['verdict'], 'FAIL')
         self.assertIn('not forced', entry['detail'])
 
-    def test_a_drop_forced_by_a_real_overflow_is_allowed(self):
-        # The case the flag exists for. Measurements have priority over
-        # judgement for the budget, so a drop is justified exactly as far as
-        # the slot phrases overflow the cap on their own.
+    def test_a_minimal_drop_forced_by_a_real_overflow_is_allowed(self):
+        # The case the flag exists for, at a cap the rest of the checks can
+        # still pass. An earlier version used a cap of 60, where the fixed tail
+        # alone is 36 characters and `budget` could never pass, so it asserted
+        # only `provenance` and proved nothing about the branch in context.
         filled = b.slots(FULL_SHEET)
         every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
-        kept = [p for p in every if 'BPM' in p]
-        tiny = b.extract_rules(FIXTURE_INSTRUCTIONS.replace(
+        longest = max(every, key=len)
+        kept = [p for p in every if p != longest]
+        narrow = b.extract_rules(FIXTURE_INSTRUCTIONS.replace(
             'HARD limit 1,000 characters, target 850 to 950',
-            'HARD limit 60 characters, target 30 to 55'))
-        results = b.validate(
-            ', '.join(kept) + '. It opens quietly. It ends loudly.',
-            GOOD_EXCLUDE, SHEET, tiny, filled=filled,
-            declared=('It opens quietly', 'It ends loudly'),
-            dropped=tuple(p for p in every if p not in kept))
+            'HARD limit 200 characters, target 150 to 200'))
+        results = b.validate(', '.join(kept), GOOD_EXCLUDE, SHEET, narrow,
+                             filled=filled, dropped=(longest,))
         self.assertEqual(check(results, 'provenance')['verdict'], 'PASS')
+
+    def test_a_drop_larger_than_the_overflow_needs_is_refused(self):
+        # Minimality is the whole rule. Dropping two phrases when one would
+        # have brought the slots inside the cap is not forced, and the message
+        # names the phrase that should have stayed.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        two_longest = sorted(every, key=len)[-2:]
+        kept = [p for p in every if p not in two_longest]
+        narrow = b.extract_rules(FIXTURE_INSTRUCTIONS.replace(
+            'HARD limit 1,000 characters, target 850 to 950',
+            'HARD limit 200 characters, target 150 to 200'))
+        results = b.validate(', '.join(kept), GOOD_EXCLUDE, SHEET, narrow,
+                             filled=filled, dropped=tuple(two_longest))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('not minimal', entry['detail'])
 
     def test_a_drop_with_an_unreadable_budget_cannot_be_justified(self):
         blind = b.extract_rules('a file with none of the labels')
