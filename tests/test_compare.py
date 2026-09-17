@@ -9,7 +9,7 @@ import compare as c
 GATES_AXES = tuple(c.GATES)
 REFERENCE = {'tempo_bpm': 80.7, 'key': 'F# minor', 'intro_seconds': 12.1,
              'lra_lu': 4.1, 'low_end_share': 16.4, 'section_count': 7,
-             'lead_register_midi': 42}
+             'lead_register_midi': 42, 'tuning': 'drop C#'}
 
 
 class CompareTests(unittest.TestCase):
@@ -64,12 +64,12 @@ class CompareTests(unittest.TestCase):
         candidate = {'tempo_bpm': 83.0}  # only tempo measured
         result = c.score(REFERENCE, candidate)
         self.assertEqual(result['verdict'], 'PASS')
-        # All 7 axes present in result
-        self.assertEqual(len(result['axes']), 7)
-        # One PASS (tempo), six UNKNOWN (not measured)
+        # All 8 axes present in result
+        self.assertEqual(len(result['axes']), 8)
+        # One PASS (tempo), seven UNKNOWN (not measured)
         verdicts = [a['verdict'] for a in result['axes']]
         self.assertEqual(verdicts.count('PASS'), 1)
-        self.assertEqual(verdicts.count('UNKNOWN'), 6)
+        self.assertEqual(verdicts.count('UNKNOWN'), 7)
 
     def test_flat_key_matches_sharp_equivalent_exactly(self):
         result = c.score(dict(REFERENCE, key='Gb minor'), dict(REFERENCE, key='F# minor'))
@@ -96,7 +96,7 @@ class CompareTests(unittest.TestCase):
         result = c.score(REFERENCE, candidate)
         self.assertEqual(result['verdict'], 'PASS')
         self.assertEqual(result['measured'], 2)
-        self.assertEqual(result['unmeasured'], 5)
+        self.assertEqual(result['unmeasured'], 6)
         # Counts must be present alongside verdict at top level
         self.assertIn('measured', result)
         self.assertIn('unmeasured', result)
@@ -117,7 +117,7 @@ class CompareTests(unittest.TestCase):
                 result = c.score(dict(REFERENCE, key=value), dict(REFERENCE, key=value))
                 key_axis = next(a for a in result['axes'] if a['axis'] == 'key')
                 self.assertEqual(key_axis['verdict'], 'UNKNOWN')
-                self.assertEqual(result['measured'], 6)
+                self.assertEqual(result['measured'], 7)
                 self.assertEqual(result['unmeasured'], 1)
 
     def test_key_verdict_parses_before_declaring_a_match(self):
@@ -178,7 +178,7 @@ class UnusableValueTests(unittest.TestCase):
         # An axis nothing could score must not inflate MEASURED, which is
         # what the fact sheet prints as evidence of how much was checked.
         result = c.score(REFERENCE, dict(REFERENCE, section_count='7'))
-        self.assertEqual(result['measured'], 6)
+        self.assertEqual(result['measured'], 7)
         self.assertEqual(result['unmeasured'], 1)
 
     def test_a_quoted_number_is_never_coerced_into_a_match(self):
@@ -229,6 +229,72 @@ class UnusableValueTests(unittest.TestCase):
                 with self.subTest(axis=axis, value=label):
                     c.score(dict(REFERENCE, **{axis: value}),
                             dict(REFERENCE, **{axis: value}))
+
+
+class TuningAxisTests(unittest.TestCase):
+    def test_the_same_tuning_passes(self):
+        result = c.score(REFERENCE, dict(REFERENCE))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'PASS')
+
+    def test_an_enharmonic_spelling_is_the_same_tuning(self):
+        result = c.score(REFERENCE, dict(REFERENCE, tuning='Drop Db'))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'PASS')
+
+    def test_a_neighbouring_tuning_fails_rather_than_warning(self):
+        result = c.score(REFERENCE, dict(REFERENCE, tuning='drop D'))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'FAIL')
+
+    def test_an_unmeasured_tuning_is_unknown_not_a_pass(self):
+        candidate = {k: v for k, v in REFERENCE.items() if k != 'tuning'}
+        result = c.score(REFERENCE, candidate)
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_a_tuning_that_is_not_a_string_is_unknown_not_a_crash(self):
+        result = c.score(REFERENCE, dict(REFERENCE, tuning=7))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_the_pitch_is_folded_wherever_the_name_puts_it(self):
+        # The conventional names put the pitch at either end: 'drop C#' ends
+        # with it, 'Eb standard' begins with it. Folding the last token only
+        # meant Eb and D# were the same pitch spelled two ways and scored FAIL.
+        result = c.score(dict(REFERENCE, tuning='Eb standard'),
+                         dict(REFERENCE, tuning='D# standard'))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'PASS')
+
+    def test_a_string_naming_no_pitch_is_unknown_on_both_sides(self):
+        # The key axis learned this already: any two identical strings compare
+        # equal, so a sentinel matched itself and earned a PASS on an axis
+        # nothing had measured. A tuning with no note name in it is not a
+        # tuning, whatever it is.
+        for value in ('unknown', 'n/a', '', 'banana', 'not a tuning'):
+            with self.subTest(value=value):
+                result = c.score(dict(REFERENCE, tuning=value),
+                                 dict(REFERENCE, tuning=value))
+                axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+                self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_a_placeholder_tuning_does_not_inflate_the_measured_count(self):
+        # MEASURED exists to stop a sheet that resolved nothing reading as a
+        # sheet that passed. An axis scoring PASS off a placeholder is exactly
+        # the escape hatch that count was added to close.
+        sheet = {'tuning': 'unknown', 'tempo_bpm': 80.7}
+        result = c.score(sheet, dict(sheet))
+        self.assertEqual(result['measured'], 1)
+        self.assertEqual(result['unmeasured'], len(c.GATES) - 1)
+
+    def test_the_word_a_is_a_note_name_but_not_a_tuning(self):
+        # 'a' is both the English article and a note name, so a normaliser
+        # that scans every token for a pitch reads 'not a tuning' as the
+        # tuning 'not tuning A' and passes it against itself. Anchoring the
+        # pitch to either end is what rejects it.
+        self.assertIsNone(c.normalise_tuning('not a tuning'))
+        self.assertEqual(c.normalise_tuning('drop A'), 'drop A')
 
 
 if __name__ == '__main__':

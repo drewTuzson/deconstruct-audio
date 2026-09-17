@@ -87,6 +87,33 @@ def save_config(value):
         if os.path.exists(name):
             os.unlink(name)
 
+def write_json(target, value):
+    """Write JSON atomically, through the mkstemp then os.replace pattern.
+
+    This module already had that pattern twice, in save_config and
+    write_style, but both are bound to the private config directory and
+    neither takes a destination. measurements.json is written with a plain
+    write_text, which is not atomic and is not a helper, so there was nothing
+    reusable to call. One writer here rather than three inline copies in
+    cmd_facts.
+
+    allow_nan=False is deliberate: a stray NaN or infinity raises here rather
+    than serialising to a token no JSON reader outside Python accepts.
+
+    mkstemp creates at 0600 and os.replace preserves it, so these files land
+    private. That is tighter than the reports directory needs and never wider,
+    which is the direction this repo's invariant cares about.
+    """
+    target = Path(target)
+    fd, name = tempfile.mkstemp(dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(value, handle, indent=2, allow_nan=False)
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
 def api_key():
     a, b = os.environ.get('GEMINI_API_KEY'), os.environ.get('GOOGLE_API_KEY')
     for value in (a, b):
@@ -600,6 +627,30 @@ def cmd_compare(args):
     print(f'VERDICT={result["verdict"]}')
     return COMPARE_EXIT.get(result['verdict'], 4)
 
+def cmd_facts(args):
+    import facts as facts_mod
+    out = args.out or (Path.cwd() / 'reports')
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        sheet = facts_mod.fact_sheet(args.audio, stems_dir=args.stems,
+                                     cache_root=secure_config_dir() / 'cache')
+    except (facts_mod.FactError, facts_mod.StemAdoptionError) as exc:
+        raise SkillError(str(exc)) from None
+    write_json(out / 'facts.json', sheet)
+    (out / 'facts.md').write_text(facts_mod.render_markdown(sheet),
+                                  encoding='utf-8')
+    write_json(out / 'scorable.json', facts_mod.scorable(sheet))
+    graded = {}
+    for entry in sheet['facts'].values():
+        graded[entry['confidence']] = graded.get(entry['confidence'], 0) + 1
+    print(f'FACTS_WRITTEN={out / "facts.json"}')
+    print(f'SCORABLE_WRITTEN={out / "scorable.json"}')
+    for grade in ('KNOW', 'INFER', 'UNKNOWN'):
+        print(f'{grade}={graded.get(grade, 0)}')
+    unknown = sorted(a for a, e in sheet['facts'].items()
+                     if e['confidence'] == 'UNKNOWN')
+    if unknown:
+        print(f'UNRESOLVED={",".join(unknown)}')
 def cmd_midi(args):
     # midi_emit is imported here, not at module level, for the reason the
     # comment at the top of this file gives: a module-level import would make
@@ -660,6 +711,11 @@ def main():
                     help='Fact sheet of the reference track, the one being matched.')
     cp.add_argument('candidate', type=Path,
                     help='Fact sheet of the candidate track, the generation being scored.')
+    fp = sub.add_parser('facts')
+    fp.add_argument('audio', type=Path)
+    fp.add_argument('--stems', type=Path, default=None,
+                    help='Adopt an existing six stem folder instead of separating.')
+    fp.add_argument('--out', type=Path, default=None)
     sub.add_parser('list-styles')
     s = sub.add_parser('save-style')
     s.add_argument('name')
@@ -720,6 +776,8 @@ def main():
         cmd_tempo(args)
     elif args.command == 'compare':
         return cmd_compare(args)
+    elif args.command == 'facts':
+        cmd_facts(args)
     elif args.command == 'connect-brain':
         root, sources = brain_sources(args.path)
         cfg = config(); cfg['brain_path'] = str(root); save_config(cfg)
