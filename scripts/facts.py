@@ -7,12 +7,21 @@ that cannot say how it was measured is not a fact, so fact() raises rather
 than emitting one.
 """
 import math
+import re
+from pathlib import Path
+
+import stems
 
 CONFIDENCE = ('KNOW', 'INFER', 'UNKNOWN')
 ACTIONABLE = ('direct', 'indirect', 'midi_only', 'none')
+AUDIO_SUFFIXES = ('.wav', '.flac', '.mp3', '.aif', '.aiff')
 
 
 class FactError(Exception):
+    pass
+
+
+class StemAdoptionError(Exception):
     pass
 
 
@@ -85,3 +94,48 @@ def fact(value, unit, stem, method, confidence, suno_actionable,
     return {'value': value, 'unit': unit, 'stem': stem, 'band_hz': band_hz,
             'method': list(method), 'confidence': confidence,
             'suno_actionable': suno_actionable, 'note': note}
+
+
+def _match(names, pattern):
+    return {n: [p for p in names if pattern(n, p.name.lower())]
+            for n in stems.STEM_NAMES}
+
+
+def adopt_stems(folder):
+    """Resolve an existing folder of six stems, however its files are named.
+
+    Two passes, tagged first. A name carrying `(Drums)` is claiming to be the
+    drums stem; a name that merely contains the word might be the source mix,
+    a scratch take, or a track called Another Brother. When every stem
+    resolves through the tagged form, the loose form never runs, which is what
+    keeps `Another Brother_(Other).wav` from reading as two claims on `other`.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise StemAdoptionError(f'Not a folder: {folder}')
+    audio = [p for p in sorted(folder.iterdir())
+             if p.suffix.lower() in AUDIO_SUFFIXES]
+    if not audio:
+        raise StemAdoptionError(f'No audio files in {folder}')
+
+    tagged = _match(audio, lambda n, low: f'({n})' in low)
+    if any(tagged.values()):
+        found, pass_name = tagged, 'tagged'
+    else:
+        found = _match(audio, lambda n, low: re.search(rf'\b{n}\b', low) is not None)
+        pass_name = 'loose'
+
+    missing = sorted(n for n, v in found.items() if not v)
+    if missing:
+        raise StemAdoptionError(
+            f'{folder} yields no stem for: {", ".join(missing)} (matched by '
+            f'{pass_name} name). A six stem folder is required; a partial one '
+            f'would produce a partial fact sheet, which is worse than none.')
+    ambiguous = sorted(n for n, v in found.items() if len(v) > 1)
+    if ambiguous:
+        detail = '; '.join(
+            f'{n}: ' + ', '.join(p.name for p in found[n]) for n in ambiguous)
+        raise StemAdoptionError(
+            f'More than one file claims these stems in {folder}: {detail}. '
+            f'Rename or move the extras rather than letting the sheet pick one.')
+    return {n: v[0] for n, v in found.items()}

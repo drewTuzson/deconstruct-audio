@@ -72,5 +72,76 @@ class FactShapeTests(unittest.TestCase):
         json.dumps(result, allow_nan=False)
 
 
+import tempfile
+
+
+class StemAdoptionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+
+    def _write(self, names):
+        for name in names:
+            (self.dir / name).write_bytes(b'RIFF0000WAVEfake')
+
+    def _six(self, template='1_Some Track_({}).wav'):
+        return [template.format(n.title()) for n in
+                ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')]
+
+    def test_adopts_a_supplied_six_stem_folder(self):
+        self._write(self._six())
+        result = f.adopt_stems(self.dir)
+        self.assertEqual(set(result), {'drums', 'bass', 'guitar',
+                                       'piano', 'vocals', 'other'})
+        self.assertTrue(result['drums'].name.endswith('(Drums).wav'))
+
+    def test_adopts_plain_demucs_names(self):
+        self._write([f'{n}.wav' for n in
+                     ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')])
+        self.assertEqual(set(f.adopt_stems(self.dir)),
+                         {'drums', 'bass', 'guitar', 'piano', 'vocals', 'other'})
+
+    def test_the_source_mix_sitting_beside_the_stems_is_ignored(self):
+        self._write(self._six() + ['Some Track (Official Visualizer).mp3'])
+        self.assertEqual(len(f.adopt_stems(self.dir)), 6)
+
+    def test_a_partial_folder_is_an_error_not_a_partial_sheet(self):
+        self._write(['1_x_(Drums).wav', '1_x_(Bass).wav'])
+        with self.assertRaises(f.StemAdoptionError) as caught:
+            f.adopt_stems(self.dir)
+        for missing in ('guitar', 'piano', 'vocals', 'other'):
+            self.assertIn(missing, str(caught.exception))
+
+    def test_two_files_using_the_same_tagged_form_is_an_error(self):
+        self._write(self._six())
+        self._write(['2_Some Track_(Drums).wav'])
+        with self.assertRaises(f.StemAdoptionError) as caught:
+            f.adopt_stems(self.dir)
+        self.assertIn('drums', str(caught.exception))
+
+    def test_a_tagged_name_beats_a_loose_one_rather_than_being_ambiguous(self):
+        # Deliberate: (Drums) is a more specific claim than a filename that
+        # merely contains the word. Preferring it is the whole reason the
+        # tagged pass runs first, and treating this as ambiguous would reject
+        # a folder that is not actually ambiguous.
+        self._write(self._six() + ['drums_scratch_take.wav'])
+        result = f.adopt_stems(self.dir)
+        self.assertTrue(result['drums'].name.endswith('(Drums).wav'))
+
+    def test_two_untagged_files_claiming_one_stem_is_an_error(self):
+        self._write([f'{n}.wav' for n in
+                     ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')])
+        self._write(['drums take two.wav'])
+        with self.assertRaises(f.StemAdoptionError) as caught:
+            f.adopt_stems(self.dir)
+        self.assertIn('drums', str(caught.exception))
+
+    def test_other_does_not_swallow_a_filename_containing_the_word(self):
+        self._write(self._six('1_Another Brother_({}).wav'))
+        result = f.adopt_stems(self.dir)
+        self.assertTrue(result['other'].name.endswith('(Other).wav'))
+
+
 if __name__ == '__main__':
     unittest.main()
