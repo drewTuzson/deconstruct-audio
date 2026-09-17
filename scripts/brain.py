@@ -207,3 +207,177 @@ def extract_rules(text):
         if rules[key] is UNREADABLE:
             rules['unreadable'].append(key)
     return rules
+
+
+# The Brain's rule is that a ruled out trait becomes its positive opposite.
+# Three words do not cover that. Measured: 'absent', 'free of', 'never' and
+# 'excluding' all passed a validator claiming to enforce it.
+#
+# This list will never be complete, and the check is therefore a floor rather
+# than a proof. It is still worth having, because every entry is a phrase a
+# prompt writer actually reaches for.
+#
+# It also binds the slot builder. Every phrase `slots` emits is checked against
+# this list by the suite, because a slot phrase carrying a banned word is a
+# measurement the prompt is not allowed to state: the agent must either drop it
+# and fail the drop test or keep it and fail the negation test.
+NEGATION_WORDS = ('no', 'not', 'without', 'never', 'absent', 'lacking',
+                  'excluding', 'except', 'minus', 'sans', 'devoid', 'neither',
+                  'nor', 'none', 'avoid', 'omit', 'exclude', 'free of',
+                  'free from', 'stripped of', 'rather than', 'instead of')
+
+# MIDI note number bands, named the way a prompt names them. A prompt that
+# says 42 says nothing; a prompt that says low register says the thing the
+# number meant. This mapping is the whole reason lead_register is a fact:
+# four generation cycles were spent discovering by ear that an intro had
+# arrived an octave high.
+REGISTER_BANDS = ((48, 'very low register'), (55, 'low register'),
+                  (67, 'mid register'), (79, 'high register'))
+LOW_END_BANDS = ((8.0, 'light low end'), (14.0, 'balanced low end'),
+                 (22.0, 'heavy low end'), (100.0, 'dominant low end'))
+
+SLOT_KEYS = ('moods', 'instruments', 'vocals', 'production', 'direction')
+
+
+def _band(value, bands, fallback):
+    for limit, label in bands:
+        if value < limit:
+            return label
+    return fallback
+
+
+def _usable(sheet, axis):
+    entry = (sheet or {}).get('facts', {}).get(axis)
+    if not entry or entry.get('confidence') == 'UNKNOWN':
+        return None
+    if entry.get('value') is None:
+        return None
+    return entry
+
+
+# The default control axis for the exit bar.
+#
+# A module level constant that nothing references is not a default, it is a
+# comment, and this one was exactly that for two revisions while both the plan
+# and the pre spend checklist said the default was lead_register.
+#
+# `deconstruct.py` cannot import this module at the top to read it, because of
+# the lazy import rule at deconstruct.py:22, so its parser repeats the literal
+# and a test asserts the two agree. A repeated literal with a test on it is
+# honest duplication; a constant nothing reads is not.
+HOLD_OUT_DEFAULT = 'lead_register'
+HOLD_OUT_CHOICES = ('tempo', 'tuning', 'intro_seconds', 'lead_register',
+                    'spectral_balance')
+
+
+def slots(sheet, hold_out=None):
+    """Measurements to prompt phrases. An UNKNOWN never becomes a phrase.
+
+    `hold_out` names one measured axis to deliberately keep OUT of the prompt.
+    It is the control for the exit bar.
+
+    Without it, a generation matching the reference is consistent with the fact
+    sheet doing the work and equally consistent with an agent writing a good
+    prompt from prose, and the bar cannot tell those apart. With it, the axes
+    that reached the prompt and the one that did not are scored separately. If
+    the carried axes match and the held out one does not, the sheet is what
+    carried the result. If everything matches equally well, something other
+    than the prompt is driving it and the bar has told you so.
+
+    `lead_register` is the default because the parent spec records four
+    generation cycles lost to an intro arriving an octave high, which makes it
+    the axis most likely to drift when nothing anchors it.
+    """
+    out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
+           'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': [],
+           'held_out': hold_out}
+    for axis, entry in (sheet or {}).get('facts', {}).items():
+        if entry.get('confidence') == 'UNKNOWN' or entry.get('value') is None:
+            out['unusable'].append(axis)
+
+    tempo = None if hold_out == 'tempo' else _usable(sheet, 'tempo')
+    if tempo:
+        out['moods'].append(f'{round(float(tempo["value"]))} BPM')
+        # See THE TEMPO RULE in the plan. _usable already drops an UNKNOWN
+        # tempo, so nothing reaches here without a value, but an INFER tempo
+        # whose family holds a competing metrical level is a minority reading
+        # and the agent must not silently turn it into a tag.
+        if tempo['confidence'] != 'KNOW':
+            out['ask_first'].append(
+                f'tempo is graded {tempo["confidence"]}: {tempo.get("note")}')
+
+    tuning = None if hold_out == 'tuning' else _usable(sheet, 'tuning')
+    if tuning:
+        out['instruments'].append(
+            f'{str(tuning["value"]).replace("#", " sharp")} tuned rhythm guitar'
+            .replace('-', ' '))
+
+    lead = (None if hold_out == 'lead_register'
+            else _usable(sheet, 'lead_register'))
+    if lead:
+        label = _band(float(lead['value']['median_midi']), REGISTER_BANDS,
+                      'very high register')
+        out['instruments'].append(f'{label} lead guitar figure')
+
+    vocal = _usable(sheet, 'vocal_register')
+    if vocal:
+        label = _band(float(vocal['value']['median_midi']), REGISTER_BANDS,
+                      'very high register')
+        out['vocals'].append(f'{label} lead vocal')
+
+    spectral = (None if hold_out == 'spectral_balance'
+                else _usable(sheet, 'spectral_balance'))
+    if spectral:
+        out['production'].append(
+            _band(float(spectral['value']['low_end_share']), LOW_END_BANDS,
+                  'dominant low end'))
+
+    harmonic = _usable(sheet, 'harmonic_rhythm')
+    if harmonic:
+        out['production'].append(f'{harmonic["value"]["label"]} harmony')
+
+    intro = (None if hold_out == 'intro_seconds'
+             else _usable(sheet, 'intro_seconds'))
+    # section_count, not sections. The fact sheet split that axis: boundaries
+    # are INFER and the count is UNKNOWN by construction, because sixteen
+    # segmentation methods failed to generalise. Reading the old name returns
+    # None silently, which cost the direction prose its second sentence while
+    # the Brain requires two to three. The agent was then quietly expected to
+    # invent one, which is the exact failure this whole pipeline exists to stop.
+    sections = _usable(sheet, 'section_count')
+    boundaries = _usable(sheet, 'section_boundaries')
+    if intro:
+        out['direction'].append(
+            f'The song opens on roughly {round(float(intro["value"]))} seconds '
+            f'of build before the full arrangement lands.')
+    # Neither sentence claims the track ends without a fade. The plan's wording
+    # did, and it was wrong twice over: nothing in the sheet measures a fade,
+    # and 'without' is a negation word the Brain bans outright, so the phrase
+    # could not legally reach a prompt. A slot phrase the validator must reject
+    # is worse than a missing one, because the agent's only escape is a drop it
+    # cannot justify against the budget.
+    if sections:
+        out['direction'].append(
+            f'It moves through about {int(sections["value"])} distinct '
+            f'sections of its own.')
+    elif boundaries and len(boundaries['value']) >= 2:
+        # The count is UNKNOWN, but the boundaries are real and the Brain needs
+        # a second direction sentence. This says what was measured, the shape,
+        # without stating a count nothing earned.
+        spans = [later - earlier
+                 for earlier, later in zip(boundaries['value'],
+                                           boundaries['value'][1:])]
+        longest = max(spans) if spans else 0
+        out['direction'].append(
+            f'It changes texture several times, with its longest unbroken '
+            f'stretch running about {round(longest)} seconds.')
+    if len(out['direction']) < 2:
+        out['unusable'].append('direction_prose_second_sentence')
+
+    chords = _usable(sheet, 'chords')
+    if chords:
+        out['midi_only'].append('chord progression, supplied as MIDI')
+    key = _usable(sheet, 'key')
+    if key:
+        out['midi_only'].append(f'key, {key["value"]}, supplied as MIDI')
+    return out

@@ -172,5 +172,152 @@ class RuleExtractionTests(unittest.TestCase):
         self.assertIn('budgets.custom', rules['unreadable'])
 
 
+FULL_SHEET = {'facts': {
+    'tempo': {'value': 80.7, 'unit': 'bpm', 'confidence': 'KNOW',
+              'suno_actionable': 'direct'},
+    'key': {'value': 'F# minor', 'unit': 'name', 'confidence': 'KNOW',
+            'suno_actionable': 'direct'},
+    'tuning': {'value': 'drop C#', 'unit': 'name', 'confidence': 'INFER',
+               'suno_actionable': 'direct'},
+    'lead_register': {'value': {'median_midi': 42.0, 'p10_midi': 38.0,
+                                'p90_midi': 55.0},
+                      'unit': 'midi', 'confidence': 'INFER',
+                      'suno_actionable': 'direct'},
+    'vocal_register': {'value': None, 'unit': 'midi', 'confidence': 'UNKNOWN',
+                       'suno_actionable': 'direct'},
+    'harmonic_rhythm': {'value': {'label': 'static', 'median_chord_bars': 4.0},
+                        'unit': 'bars', 'confidence': 'INFER',
+                        'suno_actionable': 'indirect'},
+    'intro_seconds': {'value': 12.1, 'unit': 's', 'confidence': 'INFER',
+                      'suno_actionable': 'direct'},
+    'sections': {'value': {'count': 7, 'boundaries_s': []}, 'unit': 'count',
+                 'confidence': 'INFER', 'suno_actionable': 'direct'},
+    'spectral_balance': {'value': {'low_end_share': 16.4, 'centroid_hz': 1800.0,
+                                   'air_share': 4.0},
+                         'unit': 'percent', 'confidence': 'KNOW',
+                         'suno_actionable': 'indirect'},
+    'chords': {'value': [{'root': 'F#', 'quality': 'power'}],
+               'unit': 'sequence', 'confidence': 'INFER',
+               'suno_actionable': 'midi_only'},
+}}
+
+
+def _sheet_with(**axes):
+    """FULL_SHEET plus or minus a few axes, without mutating the fixture."""
+    facts = dict(FULL_SHEET['facts'])
+    for name, entry in axes.items():
+        if entry is None:
+            facts.pop(name, None)
+        else:
+            facts[name] = entry
+    return {'facts': facts}
+
+
+def _every_phrase(filled):
+    return sum((filled[key] for key in b.SLOT_KEYS), [])
+
+
+class SlotTests(unittest.TestCase):
+    def setUp(self):
+        self.slots = b.slots(FULL_SHEET)
+
+    def test_the_tempo_becomes_a_mood_tag_rounded_to_a_whole_bpm(self):
+        self.assertTrue(any('81 BPM' in m for m in self.slots['moods']))
+
+    def test_the_tuning_becomes_an_instrument_tag(self):
+        joined = ' '.join(self.slots['instruments']).lower()
+        self.assertIn('drop c', joined)
+
+    def test_a_low_lead_register_becomes_a_low_register_tag_not_a_midi_number(self):
+        joined = ' '.join(self.slots['instruments']).lower()
+        self.assertIn('low', joined)
+        self.assertNotIn('42', joined)
+
+    def test_static_harmony_becomes_an_effect_not_a_chord_name(self):
+        joined = ' '.join(self.slots['production']
+                          + self.slots['direction']).lower()
+        self.assertIn('static', joined)
+        self.assertNotIn('f#', joined)
+
+    def test_the_intro_length_reaches_the_direction_prose(self):
+        joined = ' '.join(self.slots['direction']).lower()
+        self.assertIn('12', joined)
+
+    def test_a_chord_fact_is_midi_only_and_never_reaches_a_text_slot(self):
+        text = ' '.join(_every_phrase(self.slots))
+        self.assertNotIn('F#', text)
+        self.assertTrue(self.slots['midi_only'])
+
+    def test_an_unknown_axis_produces_no_tag_and_is_listed_as_unusable(self):
+        self.assertIn('vocal_register', self.slots['unusable'])
+        self.assertEqual(self.slots['vocals'], [])
+
+    def test_a_low_end_share_becomes_a_production_cue_not_a_percentage(self):
+        joined = ' '.join(self.slots['production']).lower()
+        self.assertNotIn('16.4', joined)
+        self.assertTrue(joined)
+
+    def test_a_measured_section_count_reaches_the_direction_prose(self):
+        filled = b.slots(_sheet_with(section_count={
+            'value': 7, 'unit': 'count', 'confidence': 'INFER',
+            'suno_actionable': 'direct'}))
+        self.assertTrue(any('7' in s for s in filled['direction']))
+        self.assertNotIn('direction_prose_second_sentence', filled['unusable'])
+
+    def test_boundaries_give_a_second_sentence_without_stating_a_count(self):
+        # The real sheet's shape: section_count is UNKNOWN by construction and
+        # the boundaries are real, so the shape is sayable and the count is not.
+        filled = b.slots(_sheet_with(section_boundaries={
+            'value': [0.0, 7.8, 12.1, 32.9, 57.5, 69.7, 107.8, 134.5],
+            'unit': 's', 'confidence': 'INFER', 'suno_actionable': 'direct'}))
+        self.assertEqual(len(filled['direction']), 2)
+        self.assertNotIn('direction_prose_second_sentence', filled['unusable'])
+        second = filled['direction'][1]
+        self.assertIn('38', second)          # the longest span, 107.8 to 69.7
+        self.assertNotIn('8', second.split('38')[0])   # never the count
+
+    def test_a_sheet_that_cannot_fill_the_second_sentence_says_so(self):
+        self.assertIn('direction_prose_second_sentence', self.slots['unusable'])
+
+    def test_no_slot_phrase_contains_a_negation_word(self):
+        # Every branch, not only the ones FULL_SHEET reaches. The direction
+        # sentences are the long ones and the likeliest to carry a banned word.
+        for filled in (self.slots,
+                       b.slots(_sheet_with(section_count={
+                           'value': 7, 'unit': 'count', 'confidence': 'INFER',
+                           'suno_actionable': 'direct'})),
+                       b.slots(_sheet_with(section_boundaries={
+                           'value': [0.0, 7.8, 12.1, 32.9, 57.5],
+                           'unit': 's', 'confidence': 'INFER',
+                           'suno_actionable': 'direct'}))):
+            for phrase in _every_phrase(filled):
+                for word in b.NEGATION_WORDS:
+                    self.assertIsNone(
+                        re.search(rf'\b{word}\b', phrase.lower()),
+                        f'{phrase!r} contains {word!r}')
+
+    def test_no_slot_phrase_contains_a_hyphen(self):
+        for phrase in _every_phrase(self.slots):
+            self.assertNotIn('-', phrase, phrase)
+
+    def test_an_infer_tempo_is_asked_about_rather_than_silently_tagged(self):
+        filled = b.slots(_sheet_with(tempo={
+            'value': 80.7, 'unit': 'bpm', 'confidence': 'INFER',
+            'suno_actionable': 'direct',
+            'note': 'a competing metrical level at 4/3'}))
+        self.assertTrue(filled['ask_first'])
+        self.assertIn('4/3', filled['ask_first'][0])
+
+    def test_a_known_tempo_asks_nothing(self):
+        self.assertEqual(self.slots['ask_first'], [])
+
+    def test_an_unknown_tempo_produces_no_bpm_at_all(self):
+        filled = b.slots(_sheet_with(tempo={
+            'value': None, 'unit': 'bpm', 'confidence': 'UNKNOWN',
+            'suno_actionable': 'direct'}))
+        self.assertEqual(filled['moods'], [])
+        self.assertEqual(filled['ask_first'], [])
+
+
 if __name__ == '__main__':
     unittest.main()
