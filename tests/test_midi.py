@@ -138,6 +138,57 @@ class FileTests(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual(notes[1] - notes[0], 7)
 
+    def test_the_third_bar_is_a_full_minor_triad(self):
+        # Bar 2 carries root_margin 1.38 and a measured third. Without this
+        # assertion nothing constrains its contents, and the admissible band for
+        # MIN_MARGIN widens from (1.04, 1.38] to (1.04, 1.47], so a constant as
+        # wrong as 1.45 would ship green.
+        notes = sorted(self._notes_in_bar(2))
+        self.assertEqual(len(notes), 3)
+        self.assertEqual([n - notes[0] for n in notes], [0, 3, 7])
+
+    def test_the_cut_sits_at_the_five_percent_it_documents(self):
+        """MIN_MARGIN claims to flag bars where the root won by under five
+        percent. The fixture alone only pins it to (1.04, 1.38], so this asserts
+        the documented meaning directly and fails if the constant moves."""
+        sheet = json.loads(json.dumps(FIXTURE))
+        sheet['facts']['chords']['value'] = [
+            dict(entry(root='A', start_s=0.0, end_s=3.0), root_margin=1.0499),
+            dict(entry(root='A', start_s=3.0, end_s=6.0), root_margin=1.0501)]
+        # Just under five percent is a sustained root; just over is a chord.
+        self.assertEqual(m.low_confidence_bars(sheet), [0])
+
+    def test_a_window_edge_that_is_not_a_number_is_an_authored_error(self):
+        for field, bad in (('end_s', 'eight point five'), ('start_s', None),
+                           ('end_s', [12.0]), ('start_s', {})):
+            with self.subTest(field=field, bad=bad):
+                sheet = json.loads(json.dumps(FIXTURE))
+                sheet['facts']['chords']['value'][1][field] = bad
+                with self.assertRaises(m.MidiEmitError) as caught:
+                    m.progression(sheet)
+                # The message has to name the bar and the field, or it is no
+                # better than the ValueError it replaced.
+                self.assertIn('bar 1', str(caught.exception))
+                self.assertIn(field, str(caught.exception))
+
+    def test_a_non_finite_window_edge_is_an_error_not_a_garbage_tick(self):
+        # NaN survives arithmetic and compares false against every bound, so it
+        # would slip past the zero width and backwards checks unnoticed.
+        for bad in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(bad=bad):
+                sheet = json.loads(json.dumps(FIXTURE))
+                sheet['facts']['chords']['value'][1]['end_s'] = bad
+                with self.assertRaises(m.MidiEmitError):
+                    m.progression(sheet)
+
+    def test_a_first_bar_starting_before_zero_does_not_blame_bar_minus_one(self):
+        sheet = json.loads(json.dumps(FIXTURE))
+        sheet['facts']['chords']['value'][0]['start_s'] = -1.0
+        with self.assertRaises(m.MidiEmitError) as caught:
+            m.progression(sheet)
+        self.assertNotIn('bar -1', str(caught.exception))
+        self.assertIn('bar 0', str(caught.exception))
+
     def test_every_note_on_has_a_matching_note_off(self):
         open_notes = {}
         for msg in self.mid.tracks[0]:

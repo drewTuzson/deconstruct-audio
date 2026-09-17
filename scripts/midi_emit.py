@@ -9,56 +9,54 @@ it writes root and fifth, because most distorted guitar is genuinely ambiguous
 between major and minor and a guessed third would be this tool inventing
 information. That is the defect the whole project was built against.
 """
+# mido at module level, unlike the deferred imports in deconstruct.py. That rule
+# exists so every command, doctor included, still runs on an incomplete install,
+# and doctor is what diagnoses that state. It does not apply here: this module
+# cannot do anything at all without mido, so deferring the import only moves the
+# same ImportError later and hides it from a reader of the file's head.
+import math
+
+import mido
+
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
 FLATS = {'DB': 'C#', 'EB': 'D#', 'GB': 'F#', 'AB': 'G#', 'BB': 'A#'}
 MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
 # How far the root must beat the second strongest pitch class before the bar
 # gets a chord rather than a sustained root.
 #
-# An earlier draft thresholded on `strength`, the root's share of a normalised
-# 12 bin chroma. That is not a confidence: its floor is 0.083 by construction,
-# and at 0.12 the rule fired on 3 bars out of 163 across the whole corpus, so
-# it was close to a no op wearing the name of a safeguard.
+# I ran the sweep in this file's plan across all three corpus fact sheets, 163
+# bars, and these are those numbers rather than any inherited from a review:
 #
-# 1.05, not 1.25. Measured across all three corpus fact sheets, 163 bars:
+#   track      bars   min    median   max      <1.05      <1.25
+#   murder      45    1.001  1.149    1.777     8 (18%)   36 (80%)
+#   danger      65    1.001  1.126    1.657    12 (19%)   52 (80%)
+#   wrongturn   53    1.001  1.183    3.144    12 (23%)   34 (64%)
+#   corpus     163    1.001  1.149    3.144    32 (20%)  122 (75%)
 #
-#   murder    45 bars  min 1.001  median 1.149  max 1.777
-#   danger    65 bars  min 1.001  median 1.126  max 1.657
-#   wrongturn 53 bars  min 1.001  median 1.183  max 3.144
+# That rules out both constants this one replaced. 1.25 sits above the median on
+# every track and would turn three quarters of the corpus into sustained roots.
+# The draft before it thresholded on `strength`, the root's share of a
+# normalised 12 bin chroma, which is not a confidence at all: its floor is 0.083
+# by construction, and at 0.12 it fired on 3 bars in 163, a safeguard that never
+# fires wearing the name of one.
 #
-# 1.25 sits ABOVE the median on every track and would turn 122 of 163 bars into
-# sustained roots, 75 percent of the corpus. The constant it replaced fired on
-# 3 bars of 163. Both were chosen without looking at the distribution and both
-# are wrong, in opposite directions.
+# What the sweep does NOT give is a cut. The distribution is smooth and has no
+# cliff to sit in, so there is no value here that the data picks out. The
+# constant therefore comes from what the number means: a margin of exactly 1.0
+# is a tie between two pitch classes, and the corpus minimum is 1.001, so 1.05
+# flags the bars where the winning root beat the runner up by less than five
+# percent. That is the condition a sustained root is FOR. It fires on about one
+# bar in five, which does real work without taking over the clip.
 #
-# 1.05 is set from what the number means rather than from a target hit rate. A
-# margin of exactly 1.0 is a tie between two pitch classes, so 1.05 flags the
-# bars where the winning root beat the runner up by less than five percent.
-# That is the condition a sustained root is FOR.
+# `test_the_cut_sits_at_the_five_percent_it_documents` pins that meaning. Change
+# this constant and that test fails, which is deliberate: the fixture's own bars
+# only constrain it to (1.04, 1.38], so without the boundary test a constant as
+# wrong as 1.30 would ship green.
 #
-# Re-measured against the three real corpus sheets rather than inherited. The
-# figures above reproduce exactly, and the full sweep is:
-#
-#   cut    murder     danger     wrongturn    corpus
-#   1.02    3/45        5/65       8/53        16/163   9.8%
-#   1.05    8/45       12/65      12/53        32/163  19.6%
-#   1.10   15/45       30/65      19/53        64/163  39.3%
-#   1.25   36/45       52/65      34/53       122/163  74.8%
-#
-# So 1.25 really would turn three quarters of the corpus into sustained roots,
-# and no bar in the corpus is an exact tie: the minimum margin is 1.001.
-#
-# The distribution is smooth and offers no natural cliff to cut at, so the
-# number is set from what it means rather than from where a histogram bends. A
-# margin of exactly 1.0 is a tie between two pitch classes, so 1.05 flags the
-# bars where the winning root beat the runner up by less than five percent.
-# That is the condition a sustained root is FOR. It fires on about one bar in
-# five, which is a safeguard that does real work without taking over the clip.
-#
-# Reading the rate as a fault in this constant would be a mistake. All three
-# tracks report harmonic_rhythm UNKNOWN because the measured root changes in
-# every bar, so a fifth of bars being hard to call is a property of the chord
-# axis on this material, not a threshold to loosen.
+# Reading the one-in-five rate as a fault in this threshold would be a mistake.
+# All three tracks report harmonic_rhythm UNKNOWN because the measured root
+# changes in every bar, so a fifth of bars being hard to call is a property of
+# the chord axis on this material, not a threshold to loosen.
 MIN_MARGIN = 1.05
 
 
@@ -83,11 +81,13 @@ def root_midi(name, octave=3):
 def chord_pitches(entry, octave=3):
     """Root position block chord. No inversions, no invented thirds."""
     octave = max(-1, min(8, int(octave)))
+    # No range fixup after this point, and none is reachable. root_midi raises
+    # unless 0 <= root <= 127, and the clamp above caps the octave at 8, so the
+    # reachable roots run C-1 = 0 to B8 = 119 and the highest fifth is 126.
+    # Checked against all 120: neither a low nor a high correction ever fired.
+    # An untested fallback is a claim nobody checks, so it is gone rather than
+    # left sitting there looking like it protects something.
     root = root_midi(entry['root'], octave)
-    while root + FIFTH > 127:
-        root -= 12
-    while root < 0:
-        root += 12
     if not entry.get('third_present'):
         return [root, root + FIFTH]
     quality = entry.get('quality')
@@ -99,8 +99,6 @@ def chord_pitches(entry, octave=3):
         return [root, root + FIFTH]
     return [root, root + third, root + FIFTH]
 
-
-import mido
 
 BEATS_PER_BAR = 4
 VELOCITY = 80
@@ -119,6 +117,31 @@ def _require(sheet, axis):
             f'{axis} is graded {entry.get("confidence")} with value '
             f'{entry.get("value")!r}; there is nothing here to write')
     return entry['value']
+
+
+def _window_value(entry, index, field):
+    """One edge of a chord window, as a finite number or an authored error.
+
+    Without this, a sheet carrying end_s as a string reaches float() and the
+    ValueError lands in the top level handler, which prints "Details suppressed
+    to protect secrets" for what is a data problem in a file the user supplied.
+    That is the same failure read_facts already fixed one layer up, one field
+    deeper. A NaN is worse than a string: it survives arithmetic, compares false
+    against every bound, and would write a garbage delta time instead of raising.
+    """
+    raw = entry.get(field)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise MidiEmitError(
+            f'bar {index} has {field}={raw!r}, which is not a number. Chord '
+            f'window edges must be seconds, and the emitter will not guess one '
+            f'it was not given.') from None
+    if not math.isfinite(value):
+        raise MidiEmitError(
+            f'bar {index} has {field}={raw!r}, which is not a finite number of '
+            f'seconds. The chord sequence in this fact sheet is not well formed.')
+    return value
 
 
 def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
@@ -170,8 +193,10 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
         else:
             pitches = chord_pitches(entry, octave)
         if align:
-            start = int(round(float(entry.get('start_s') or 0.0) * ticks_per_second))
-            end = int(round(float(entry.get('end_s') or 0.0) * ticks_per_second))
+            start = int(round(_window_value(entry, index, 'start_s')
+                               * ticks_per_second))
+            end = int(round(_window_value(entry, index, 'end_s')
+                            * ticks_per_second))
             width = end - start
             # Validate here, not later. max(1, ...) looks like a safe clamp and
             # is not: a zero width window leaves cursor one tick ahead of the
@@ -189,10 +214,15 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
                     f'The chord sequence in this fact sheet is not ordered or '
                     f'not well formed; the emitter will not invent a width.')
             if start < cursor:
+                # Bar 0 has no predecessor, so naming one would print "bar -1"
+                # and send the reader looking for a window that does not exist.
+                # It is reachable: a negative start_s lands here on the first bar.
+                where = (f'before bar {index - 1} ended' if index
+                         else 'before the start of the clip')
                 raise MidiEmitError(
-                    f'bar {index} starts at {entry.get("start_s")} s, before '
-                    f'bar {index - 1} ended. Chord windows must not overlap or '
-                    f'run backwards.')
+                    f'bar {index} starts at {entry.get("start_s")} s, {where}. '
+                    f'Chord windows must not overlap, run backwards, or begin '
+                    f'before zero.')
         else:
             start = index * bar_ticks
             width = bar_ticks
