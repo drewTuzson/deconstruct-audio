@@ -37,6 +37,16 @@ Three commands measure instead of describing. None of them needs a key, a comple
 
 `compare <reference> <candidate>` scores a candidate fact sheet against a reference one, axis by axis. Order matters and cannot be recovered from the files, so the reference comes first; the report echoes `REFERENCE=` and `CANDIDATE=` for that reason. It scores only the axes present on both sides. Anything missing is counted in `UNMEASURED=` and is never assumed to pass, so a `PASS` printed above a high unmeasured count means little was checked, and saying so is part of reporting the result. The exit code carries the verdict: 0 PASS, 2 FAIL, 3 WARN, 4 UNKNOWN, and 1 if the command itself failed.
 
+## Harmony as MIDI: midi
+
+`midi <facts.json>` writes the measured chord progression of a fact sheet to a MIDI file and prints `MIDI_WRITTEN=<path>`. It exists because chord names written into a text prompt are discarded by the generator, so the clip is the channel that carries harmony when text cannot. `--out` names the file, which otherwise lands as `progression.mid` beside the fact sheet, and `--octave` moves the chord roots. It reads only the fact sheet: no audio, no network, no key.
+
+Never describe the output as a transcription. It is the harmonic skeleton and nothing else: one chord per bar, root position block chords, no melody, no inversions, no voicings. Say "the measured chord progression", not "the song as MIDI".
+
+The emitter writes no pitch it did not measure, and reporting the result means passing that on rather than smoothing it over. A bar whose third was never measured carries root and fifth, because most distorted guitar is genuinely ambiguous between major and minor and a guessed third would be the tool inventing information. A bar whose root barely beat the runner up carries a sustained root instead of a chord; those bars are printed as `SUSTAINED_ROOT_BARS=<indices>` with a note on stderr, and naming them is the point. If that line appears, say which bars the emitter could not resolve rather than letting a thinner sounding clip imply it.
+
+A fact sheet with no chord sequence, or one graded UNKNOWN, is an error and not an empty file. So is a chord window that spans no time or runs backwards: the emitter refuses to invent a width, and the message names the bar and its two timestamps. That is a data problem in the fact sheet, so read it as one rather than retrying the command.
+
 ## Use with the Brain
 
 When the user wants a Suno prompt and a Brain is configured, read [references/brain.md](references/brain.md). Load the user's own Brain instructions, determine the requested Suno mode, and use the reviewed report as source evidence. Keep faithful analysis separate from mode-specific prompt choices. Count exact output field characters against that user's loaded rules; do not ship one person's limits or preferences as universal Suno requirements.

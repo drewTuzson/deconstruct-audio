@@ -72,6 +72,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `separate <file>` | Splits the audio into six stems with Demucs and prints `STEM_<NAME>=<path>` for each. Cached by source hash, so a repeat run reuses them. `--out` puts the cache somewhere other than the configuration directory |
 | `tempo <file>` | Reports tempo as a family of related candidates with a confidence grade, not a single number. Add `--from-drums` to separate first and measure the drums stem |
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
+| `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -94,6 +95,18 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 
 ```
 compare reference.json candidate.json
+```
+
+`midi` exists because chord names in a text prompt are discarded. Community
+evidence is consistent on that, and the most cited workaround is supplying
+audio, so the MIDI clip is the channel that carries harmony when text cannot.
+The emitter writes nothing it did not measure: where the third was absent it
+writes root and fifth rather than choosing between major and minor, and where
+the chord itself scored below threshold it writes a sustained root and prints
+which bars those were.
+
+```
+midi facts.json --out progression.mid
 ```
 
 ## Saved styles
@@ -126,6 +139,9 @@ Credentials live outside the package, in `~/.config/deconstruct-audio/` or where
 - **`compare` scores only what both sides measured**, against loose gates. A `PASS` above a high `UNMEASURED` count means little was checked, not that little was wrong.
 - `analyze` does no stem separation; `separate` is a separate command and needs a multi-gigabyte Demucs and torch install. There is still no plugin chain recovery and no track count, and the prompt forbids inventing them.
 - One file per run, longer than zero seconds and up to 30 minutes. Longer recordings need an excerpt you choose; the script will not trim silently.
+- **The MIDI is harmony, not a transcription.** No melody, no inversions, no
+  voicings. A bar whose chord scored low is a sustained root, and the command
+  names those bars rather than letting a thinner clip imply them.
 - Lyrics are not transcribed.
 
 ## Optional: SunoGPT Brain
