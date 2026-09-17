@@ -280,7 +280,13 @@ def _number(value):
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        # JSON carries integers of unbounded size and float() refuses the ones
+        # past its range. Unusable is the honest answer; letting OverflowError
+        # out reaches the user as 'Details suppressed to protect secrets'.
+        return None
     # NaN and infinity are not measurements. write_json refuses them on the way
     # out; this refuses them on the way in.
     return number if math.isfinite(number) else None
@@ -456,7 +462,7 @@ def slots(sheet, hold_out=None):
     # cannot justify against the budget.
     if count is not None:
         out['direction'].append(
-            f'It moves through about {int(count)} distinct sections of its own.')
+            f'It moves through about {int(count)} sections of its own.')
     elif marks and len(marks) >= 2:
         # The count is UNKNOWN, but the boundaries are real and the Brain needs
         # a second direction sentence. This says what was measured, the shape,
@@ -503,8 +509,25 @@ def _found_words(text, words):
     return [w for w in words if re.search(rf'\b{re.escape(w)}\b', low)]
 
 
-def slot_numbers(filled):
-    """Every number that appears in a slot phrase.
+QUANTITY = re.compile(r'(\d+)\s*([A-Za-z]+)?')
+
+
+def _quantities(text):
+    """Every number in `text`, paired with the word that follows it.
+
+    The unit is what makes a number a measurement, and a bare set of integers
+    throws it away. With the tempo slot holding '81 BPM', a declared sentence
+    saying '81 seconds of tape delay' passed this check and then passed
+    provenance as judgement, so the command approved a duration the fact sheet
+    never established. Pairing the number with its unit is the difference
+    between 'this number appears in the sheet' and 'this measurement does'.
+    """
+    return {(int(number), (unit or '').lower())
+            for number, unit in QUANTITY.findall(str(text))}
+
+
+def slot_quantities(filled):
+    """Every number in a slot phrase, with the unit it was measured in.
 
     The traceable set is the SLOTS, not the facts. Three reasons, and the
     second one is a measured defect rather than a preference.
@@ -527,8 +550,7 @@ def slot_numbers(filled):
     out = set()
     for key in SLOT_KEYS:
         for phrase in filled.get(key, []):
-            for token in re.findall(r'\d+', str(phrase)):
-                out.add(int(token))
+            out |= _quantities(phrase)
     return out
 
 
@@ -686,13 +708,14 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 
     # Every number traces to a slot phrase. Every number, including single
     # digits, which the earlier \d{2,4} pattern never looked at.
-    traceable = slot_numbers(filled)
-    quoted = {int(n) for n in re.findall(r'\d+', style)}
-    orphans = sorted(n for n in quoted if n not in traceable)
+    traceable = slot_quantities(filled)
+    quoted = _quantities(style)
+    orphans = sorted(f'{number} {unit}'.strip()
+                     for number, unit in quoted if (number, unit) not in traceable)
     results.append(_result(
         'numbers_trace', 'FAIL' if orphans else 'PASS',
         f'orphans {orphans}' if orphans
-        else f'{len(quoted)} numbers, all traced to a slot'))
+        else f'{len(quoted)} measurements, all traced to a slot'))
 
     # Provenance, as a contract rather than a coincidence counter.
     #
@@ -858,7 +881,13 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 
     # No names
     both = f'{body} {exclude.lower()}'
-    named = [n for n in names if n and n.lower() in both]
+    # A whole term, not an arbitrary substring. `--name Rush` used to reject
+    # 'brushed drums', which is a false FAIL on an honest prompt and the kind
+    # of noise that trains an operator to stop reading the checks. The
+    # lookarounds rather than \b so a name opening or closing on punctuation
+    # still matches.
+    named = [n for n in names if n and re.search(
+        rf'(?<![0-9A-Za-z]){re.escape(n.lower())}(?![0-9A-Za-z])', both)]
     results.append(_result('names', 'FAIL' if named else 'PASS',
                            ', '.join(named)))
 

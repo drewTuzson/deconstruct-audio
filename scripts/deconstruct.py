@@ -770,6 +770,22 @@ def brain_path():
 PROMPT_EXIT = {'PASS': 0, 'FAIL': 2, 'UNKNOWN': 4}
 
 
+def read_prompt_field(path, flag):
+    """One text field of a composed prompt, with an authored failure.
+
+    The same reason read_facts exists, for the other two inputs this command
+    takes. A typo, an unreadable file or a non UTF-8 encoding reached the top
+    level handler as a bare OSError or UnicodeError and printed 'Details
+    suppressed to protect secrets', which does not tell anyone which file to
+    fix.
+    """
+    try:
+        return Path(path).read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError):
+        raise SkillError(f'Cannot read the {flag} file: {path}. Supply a '
+                         'readable UTF-8 text file.') from None
+
+
 def cmd_prompt(args):
     # brain is imported here, not at module level, for the reason the comment
     # at the top of this file gives.
@@ -831,9 +847,8 @@ def cmd_prompt(args):
         # to reach a verdict; it was asked to fill the slots, and it did.
         return 0
 
-    style = args.style.read_text(encoding='utf-8').strip()
-    exclude = (args.exclude.read_text(encoding='utf-8').strip()
-               if args.exclude else '')
+    style = read_prompt_field(args.style, '--style')
+    exclude = read_prompt_field(args.exclude, '--exclude') if args.exclude else ''
     results = brain_mod.validate(style, exclude, sheet, rules,
                                  mode=args.mode, names=tuple(args.name),
                                  filled=filled, acknowledged=args.acknowledge,

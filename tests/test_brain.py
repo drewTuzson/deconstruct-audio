@@ -362,6 +362,15 @@ class SlotTests(unittest.TestCase):
             self.assertEqual(filled['moods'], [])
             self.assertIn('tempo', filled['unusable'])
 
+    def test_an_integer_past_the_float_range_is_unusable(self):
+        # JSON carries integers of unbounded size and float() refuses the ones
+        # past its range, so this raised OverflowError where the axis should
+        # simply have been unusable.
+        filled = b.slots({'facts': {'tempo': {'value': 10 ** 400,
+                                              'confidence': 'KNOW'}}})
+        self.assertEqual(filled['moods'], [])
+        self.assertIn('tempo', filled['unusable'])
+
     def test_a_boolean_is_not_a_measurement(self):
         # True is an int in Python and would otherwise become 1 BPM.
         filled = b.slots({'facts': {'tempo': {'value': True,
@@ -573,9 +582,39 @@ class ValidatorTests(unittest.TestCase):
         results = self.run_it(style=GOOD_STYLE + ' 7 sections')
         self.assertEqual(check(results, 'numbers_trace')['verdict'], 'FAIL')
 
+    def test_a_number_under_the_wrong_unit_does_not_trace(self):
+        # The hole a bare set of integers left. The tempo slot holds '81 BPM',
+        # so a declared sentence saying '81 seconds of tape delay' passed this
+        # check and then passed provenance as judgement, and the command
+        # approved a duration the fact sheet never established.
+        sentence = '81 seconds of tape delay on the lead'
+        results = self.run_it(
+            style=GOOD_STYLE + ' ' + sentence + '.',
+            declared=GOOD_DECLARED + (sentence,))
+        entry = check(results, 'numbers_trace')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('81 seconds', entry['detail'])
+
+    def test_the_same_number_under_its_own_unit_still_traces(self):
+        results = self.run_it()
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
+
     def test_a_supplied_name_anywhere_in_either_field_fails(self):
         results = self.run_it(style=GOOD_STYLE + ' like Placeholder Band',
                               names=('Placeholder Band',))
+        self.assertEqual(check(results, 'names')['verdict'], 'FAIL')
+
+    def test_a_name_inside_a_longer_word_is_not_that_name(self):
+        # `--name Rush` rejecting 'brushed drums' is a false FAIL on an honest
+        # prompt, and noise like that trains an operator to stop reading the
+        # checks before the spend.
+        results = self.run_it(style=GOOD_STYLE + ' brushed drums',
+                              names=('Rush',))
+        self.assertEqual(check(results, 'names')['verdict'], 'PASS')
+
+    def test_a_whole_name_beside_punctuation_still_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' (Rush), loud',
+                              names=('Rush',))
         self.assertEqual(check(results, 'names')['verdict'], 'FAIL')
 
     def test_a_negation_in_the_exclude_field_fails(self):
@@ -916,6 +955,24 @@ class CommandTests(unittest.TestCase):
         done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
         self.assertEqual(done.returncode, 1)
         self.assertIn('No Brain folder at', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+
+    def test_a_mistyped_style_path_is_an_authored_message(self):
+        self.connect()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--style', str(self.tmp / 'missing.txt'))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('Cannot read the --style file', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+
+    def test_an_unreadable_exclude_file_is_an_authored_message(self):
+        self.connect()
+        broken = self.tmp / 'exclude.bin'
+        broken.write_bytes(b'\xff\xfe not utf 8 \xff')
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--style', str(self.style), '--exclude', str(broken))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('Cannot read the --exclude file', done.stderr)
         self.assertNotIn('Details suppressed', done.stderr)
 
     def test_a_mistyped_fact_sheet_path_is_an_authored_message(self):

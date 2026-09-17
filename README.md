@@ -249,7 +249,7 @@ If you already own SunoGPT's Brain, `connect-brain` saves a pointer to your loca
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The 320 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
+The 327 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
 
 The release in this repository is the revision its author ran end to end on macOS. The Windows and Linux code paths are written and covered by mocked tests, but have not been exercised on those operating systems.
 
