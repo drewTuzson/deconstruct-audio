@@ -420,8 +420,19 @@ class TempoLevelTests(unittest.TestCase):
         # The note is prose, so the pattern can hand back something float()
         # refuses. That is a level not offered, never a ValueError for the top
         # level handler to turn into 'Details suppressed'.
-        levels = b.tempo_levels({'value': 80.7, 'note': '2x at 1.2.3 BPM'})
-        self.assertEqual([l['bpm'] for l in levels], [80.7])
+        for note in ('2x at 1.2.3 BPM', '2x at .. BPM', '2x at . BPM'):
+            levels = b.tempo_levels({'value': 80.7, 'note': note})
+            self.assertEqual([l['bpm'] for l in levels], [80.7], note)
+
+    def test_a_mangled_strength_costs_the_strength_not_the_level(self):
+        # The BPM is the measurement and the relative strength is context, so
+        # an unreadable strength must not discard a level the note names. It
+        # reports the level with no strength, which is what is actually known.
+        levels = b.tempo_levels({
+            'value': 80.7,
+            'note': '2x at 161.5 BPM (tempogram relative strength ..)'})
+        self.assertEqual([l['bpm'] for l in levels], [80.7, 161.5])
+        self.assertIsNone(levels[1]['relative_strength'])
 
     def test_a_thin_set_is_only_explained_when_that_is_why(self):
         # The ratio-only sentence must not be offered as the reason whenever
