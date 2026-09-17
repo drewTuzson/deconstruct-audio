@@ -698,16 +698,24 @@ class ValidatorTests(unittest.TestCase):
                              filled=filled, acknowledged=True)
         self.assertEqual(check(results, 'ask_first')['verdict'], 'PASS')
 
-    def test_the_parser_default_matches_the_module(self):
-        # deconstruct.py repeats this literal because it cannot import brain at
-        # the top. The repetition is fine; silent drift is not.
-        import argparse
+    def test_the_parser_agrees_with_the_module(self):
+        # Behavioural, not bytecode. The first version of this test read
+        # deconstruct.main.__code__.co_consts for the literal, and CPython only
+        # folds a tuple of constants: putting one non literal into `choices`
+        # unfolds it and the test silently passes on a broken default. The trap
+        # was that the obvious next improvement, sourcing `choices` from
+        # brain.HOLD_OUT_CHOICES, is exactly the change that disables it.
         import deconstruct
-        parser = [a for a in deconstruct.main.__code__.co_consts
-                  if isinstance(a, str) and a == b.HOLD_OUT_DEFAULT]
-        self.assertTrue(parser,
-                        'deconstruct.py no longer carries brain.HOLD_OUT_DEFAULT '
-                        'as its --hold-out default')
+        parser = deconstruct.build_parser()
+        args = parser.parse_args(['prompt', 'facts.json'])
+        self.assertEqual(args.hold_out, b.HOLD_OUT_DEFAULT)
+        for axis in b.HOLD_OUT_CHOICES:
+            parsed = parser.parse_args(['prompt', 'facts.json',
+                                        '--hold-out', axis])
+            self.assertEqual(parsed.hold_out, axis)
+        parsed = parser.parse_args(['prompt', 'facts.json',
+                                    '--hold-out', 'none'])
+        self.assertEqual(parsed.hold_out, 'none')
 
     def test_the_default_control_is_one_of_the_choices(self):
         self.assertIn(b.HOLD_OUT_DEFAULT, b.HOLD_OUT_CHOICES)
@@ -1017,21 +1025,36 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
     # is zero and no drop is ever justified. It becomes positive the day a
     # richer sheet genuinely does not fit, which is the case the flag exists
     # for.
-    # The joining overhead counts. Phrases do not appear in a style bare: tags
-    # are joined with ', ' and sentences with '. ', and leaving that out made
-    # the overflow branch arithmetically unsatisfiable. provenance forbade
-    # dropping more than slot_chars minus cap, leaving exactly cap characters
-    # that must appear, while budget capped the finished style at cap, and the
-    # separators fell in the gap between the two. It cannot fire on this
-    # pipeline, where the slots total about 311 characters against a cap of
-    # 1000, but a branch that can never be satisfied is not a branch.
+    # A drop must be MINIMAL: putting any one dropped phrase back would still
+    # overflow the cap.
+    #
+    # This replaces an allowance expressed in characters, which needed a model
+    # of how phrases are joined and could never be spent exactly because drops
+    # are whole phrases. Both problems go away when the question is asked one
+    # phrase at a time: the separator only has to be right at a single phrase
+    # margin, and there is no remainder to leave on the table.
+    #
+    # It keeps the property that made the allowance work, which is that the
+    # measurement is taken from `filled` and never from the finished style. A
+    # rule that measured the drop against what the agent actually wrote reads
+    # as forced whenever the agent filled the budget with its own prose first,
+    # and that is the exact move this is defending against.
     phrases = [p for key in SLOT_KEYS for p in filled.get(key, [])]
-    slot_chars = sum(len(p) for p in phrases) + max(0, len(phrases) - 1) * 2
-    dropped_chars = sum(len(d) for d in dropped)
+
+    def _rendered(items):
+        # Tags join with ', ' and sentences with ' ', since a sentence already
+        # carries its stop. Two is the wider of the two and this only has to be
+        # right at a one phrase margin.
+        return sum(len(i) for i in items) + max(0, len(items) - 1) * 2
+
+    kept = [p for p in phrases if _canonical(p) not in shed]
+    dropped_phrases = [p for p in phrases if _canonical(p) in shed]
+    dropped_chars = sum(len(p) for p in dropped_phrases)
     if cap is UNREADABLE or cap is None:
-        allowance = None
+        restorable = None
     else:
-        allowance = max(0, slot_chars - int(cap))
+        restorable = [p for p in dropped_phrases
+                      if _rendered(kept + [p]) <= int(cap)]
 
     measured_chars = sum(len(raw) for raw in from_slots)
     declared_chars = sum(len(raw) for raw in judgement)
@@ -1056,18 +1079,17 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
         results.append(_result(
             'provenance', 'FAIL',
             f'{note}. Measured and left out without being dropped: {unused}'))
-    elif dropped_chars and allowance is None:
+    elif dropped_phrases and restorable is None:
         results.append(_result(
             'provenance', 'FAIL',
             f'{note}. {dropped_chars} characters of measurement were dropped '
             f'and the budget could not be read, so nothing can justify them'))
-    elif dropped_chars > allowance:
+    elif restorable:
         results.append(_result(
             'provenance', 'FAIL',
-            f'{note}. {dropped_chars} characters of measurement dropped against '
-            f'an allowance of {allowance}: the slot phrases total {slot_chars} '
-            f'characters against a cap of {cap}, so they fit and the drop is '
-            f'not forced. Measurements have priority over judgement for this '
+            f'{note}. The drop is not minimal: {restorable} would fit inside '
+            f'the {cap} character cap alongside everything kept, so it was not '
+            f'forced. Measurements have priority over judgement for this '
             f'budget'))
     else:
         results.append(_result('provenance', 'PASS', note))
@@ -1109,7 +1131,7 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 49 tests
+Expected: PASS, 50 tests
 
 If `test_a_clean_style_passes_every_check_it_can_run` fails, read which check
 failed and fix the validator, not the fixture, unless the fixture genuinely
@@ -1445,7 +1467,7 @@ missing.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 60 tests
+Expected: PASS, 61 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1561,9 +1583,31 @@ def cmd_prompt(args):
         return 2
 ```
 
-- [ ] **Step 3: Register and dispatch**
+- [ ] **Step 3: Extract the parser so it can be tested**
 
-With the other parsers in `main()`:
+`main()` currently builds its parser inline. Split the construction out so a
+test can parse real arguments through it without running a command:
+
+```python
+def build_parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    ...                       # every existing sub.add_parser block, unchanged
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    ...                       # the existing dispatch, unchanged
+```
+
+Move only the construction. Change no argument, no default and no dispatch
+branch, and confirm the suite is unchanged before you add anything to it. This
+is a refactor in service of a test, and a refactor that alters behaviour on the
+way is worse than the test it enables.
+
+- [ ] **Step 4: Register and dispatch**
+
+With the other parsers in `build_parser()`:
 
 ```python
     pp = sub.add_parser('prompt')
@@ -1575,10 +1619,11 @@ With the other parsers in `main()`:
     pp.add_argument('--exclude', type=Path, default=None)
     pp.add_argument('--name', action='append', default=[],
                     help='A name that must not appear. Repeatable.')
-    # 'lead_register' repeats brain.HOLD_OUT_DEFAULT, and
-    # test_the_parser_default_matches_the_module agrees they match. It is
-    # repeated rather than imported because deconstruct.py must survive an
-    # incomplete install for doctor's sake; see the comment at line 22.
+    # These repeat brain.HOLD_OUT_DEFAULT and brain.HOLD_OUT_CHOICES rather
+    # than importing them, because deconstruct.py must survive an incomplete
+    # install for doctor's sake; see the comment at line 22. The duplication is
+    # held honest by test_the_parser_agrees_with_the_module, which parses real
+    # arguments through build_parser() instead of inspecting bytecode.
     pp.add_argument('--hold-out', default='lead_register',
                     choices=('tempo', 'tuning', 'intro_seconds',
                              'lead_register', 'spectral_balance', 'none'),
