@@ -657,10 +657,6 @@ def cmd_midi(args):
     # every command fail at import time on an incomplete install, doctor
     # included, and doctor is what diagnoses that state.
     import midi_emit
-    # read_facts, not a bare json.loads. A typo in the path reaches the
-    # top-level handler as a FileNotFoundError and prints "Details suppressed
-    # to protect secrets", which is the exact failure read_facts was written to
-    # stop, and there is no secret in a path the user just typed.
     # Check the octave before reading anything. The range belongs to midi_emit,
     # which knows why it is what it is, so this asks that module rather than
     # restating the bounds here and creating a second place to keep them right.
@@ -668,6 +664,10 @@ def cmd_midi(args):
         midi_emit.check_octave(args.octave)
     except midi_emit.MidiEmitError as exc:
         raise SkillError(str(exc)) from None
+    # read_facts, not a bare json.loads. A typo in the path reaches the
+    # top-level handler as a FileNotFoundError and prints "Details suppressed
+    # to protect secrets", which is the exact failure read_facts was written to
+    # stop, and there is no secret in a path the user just typed.
     sheet = read_facts(args.facts, 'input')
     out = args.out or args.facts.parent / 'progression.mid'
     try:
