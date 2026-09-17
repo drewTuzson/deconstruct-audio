@@ -196,14 +196,27 @@ MARGIN_CAP = 99.0
 BEATS_PER_BAR = 4
 
 
-def _bar_windows(beat_times, beats_per_bar=BEATS_PER_BAR, bars_per_chord=1):
+def _bar_windows(beat_times, beats_per_bar=BEATS_PER_BAR, bars_per_chord=1,
+                 end=None):
+    """Bar sized windows over the beat grid, the last one closing at `end`.
+
+    `end` is the duration of the analysed signal. Without it the final edge is
+    the last beat's ONSET, which means the last beat itself, and anything
+    ringing on after it, sits outside every window and is never read. A chord
+    held through the end of a track was simply absent from the sequence.
+    """
     beat_times = np.asarray(beat_times, dtype=float)
     if len(beat_times) < 2:
         return []
     step = beats_per_bar * bars_per_chord
     edges = list(beat_times[::step])
-    if edges[-1] < beat_times[-1]:
-        edges.append(float(beat_times[-1]))
+    final = float(beat_times[-1])
+    if end is not None:
+        # max, not a bare replacement: a caller passing an `end` shorter than
+        # the beat grid must not silently drop windows the grid supports.
+        final = max(final, float(end))
+    if final > edges[-1]:
+        edges.append(final)
     return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)
             if edges[i + 1] > edges[i]]
 
@@ -211,11 +224,14 @@ def _bar_windows(beat_times, beats_per_bar=BEATS_PER_BAR, bars_per_chord=1):
 def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
                    low=150, high=2500):
     """One chord per bar window, with the third reported rather than assumed."""
-    windows = _bar_windows(beat_times, bars_per_chord=bars_per_chord)
-    if not windows:
-        return []
     summed = _summed(signals)
     if summed is None:
+        return []
+    # The signal length closes the last window, so a chord held through the
+    # end of the track is read rather than falling off the grid.
+    windows = _bar_windows(beat_times, bars_per_chord=bars_per_chord,
+                           end=len(summed) / float(sr))
+    if not windows:
         return []
     y = band_limit(summed, sr, low, high)
     if np.max(np.abs(y)) < SILENCE:

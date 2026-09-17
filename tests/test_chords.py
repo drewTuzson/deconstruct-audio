@@ -193,6 +193,15 @@ class ChordSequenceTests(unittest.TestCase):
         self.assertEqual(c.harmonic_rhythm(seq([2, 2, 2]))['label'], 'slow')
         self.assertEqual(c.harmonic_rhythm(seq([4, 4]))['label'], 'static')
 
+    def test_the_last_window_runs_to_the_end_of_the_signal(self):
+        # The final edge used to be the last beat's ONSET, so the final beat
+        # and anything sustaining after it fell outside every window and were
+        # never read. Here the beats stop at 3.5 s but the audio runs to 6 s.
+        y = chord((220.0, 261.6, 329.6), 6.0)
+        seq = c.chord_sequence([y], SR, self._beats(8))
+        self.assertTrue(seq)
+        self.assertAlmostEqual(seq[-1]['end_s'], 6.0, places=2)
+
     def test_no_beats_yields_no_sequence_rather_than_a_guess(self):
         self.assertEqual(c.chord_sequence([tone(220.0, 2.0)], SR,
                                           np.array([])), [])

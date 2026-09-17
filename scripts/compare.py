@@ -124,16 +124,43 @@ def key_verdict(reference, candidate):
 
 
 def normalise_tuning(value):
-    """Fold spelling and enharmonics so drop C# and Drop Db are one answer."""
+    """Canonical '<qualifier> <pitch>' form, or None when this names no tuning.
+
+    The pitch is read from whichever END carries it, because the conventional
+    names put it at either one: 'drop C#' finishes with it and 'Eb standard'
+    opens with it. Folding the last token only made Eb and D# two spellings
+    that scored FAIL against each other.
+
+    A string with no note name at either end is not a tuning, and returning
+    None for it is what stops 'unknown' matching 'unknown' and counting as a
+    measured axis. key_verdict already learned this: any two identical strings
+    compare equal, so a sentinel earned a PASS on an axis nothing measured.
+
+    Only the ends are searched, never the middle. Every single letter from A to
+    G is a note name, so scanning all tokens reads the article in 'not a
+    tuning' as the pitch A and hands back 'not tuning A', which passes against
+    itself and reopens the hole this function exists to close.
+    """
     if not isinstance(value, str):
         return None
-    text = ' '.join(value.strip().split()).lower()
-    if not text:
+    tokens = value.strip().lower().split()
+    if not tokens:
         return None
-    parts = text.split()
-    tail = parts[-1].upper()
-    parts[-1] = FLATS_TO_SHARPS.get(tail, tail)
-    return ' '.join(parts)
+
+    def pitch_of(token):
+        upper = token.upper()
+        upper = FLATS_TO_SHARPS.get(upper, upper)
+        return upper if upper in NOTES else None
+
+    # Last first: 'drop C#' and 'standard E' are the common shapes.
+    pitch = pitch_of(tokens[-1])
+    rest = tokens[:-1]
+    if pitch is None:
+        pitch = pitch_of(tokens[0])
+        rest = tokens[1:]
+    if pitch is None:
+        return None
+    return f'{" ".join(rest) or "standard"} {pitch}'
 
 
 def tuning_verdict(reference, candidate):

@@ -137,6 +137,20 @@ class StemAdoptionTests(unittest.TestCase):
             f.adopt_stems(self.dir)
         self.assertIn('drums', str(caught.exception))
 
+    def test_a_folder_mixing_one_tagged_name_with_plain_ones_resolves(self):
+        # One tagged file used to switch the WHOLE folder to tagged matching,
+        # so five perfectly good plain-name stems beside a single `(Drums)`
+        # file were reported missing. Each stem is resolved on its own now:
+        # tagged when a tagged file claims it, loose when none does.
+        self._write(['1_Some Track_(Drums).wav'])
+        self._write([f'{n}.wav' for n in
+                     ('bass', 'guitar', 'piano', 'vocals', 'other')])
+        result = f.adopt_stems(self.dir)
+        self.assertEqual(set(result), {'drums', 'bass', 'guitar',
+                                       'piano', 'vocals', 'other'})
+        self.assertTrue(result['drums'].name.endswith('(Drums).wav'))
+        self.assertEqual(result['bass'].name, 'bass.wav')
+
     def test_other_does_not_swallow_a_filename_containing_the_word(self):
         self._write(self._six('1_Another Brother_({}).wav'))
         result = f.adopt_stems(self.dir)
@@ -247,6 +261,65 @@ class SheetTests(unittest.TestCase):
         text = f.render_markdown(sheet)
         for axis in sheet['facts']:
             self.assertIn(axis, text)
+
+    def test_a_tied_root_histogram_picks_the_same_winner_in_every_process(self):
+        # Set iteration order depends on the hash seed, so max(set(roots), ...)
+        # returned a different winner from process to process on a tied
+        # histogram. That value decides the key fact's grade and its note, both
+        # of which are written into facts.json for a person to read.
+        #
+        # This runs in subprocesses on purpose. Inside one interpreter the seed
+        # is fixed, which is exactly why corpus_check's rerun gate reports
+        # STABLE=yes for a value that is not stable: both of its passes share
+        # one process.
+        import os
+        import subprocess
+        script = (
+            'import sys; sys.path.insert(0, %r); import facts; '
+            "print(facts._most_common_root(['E','E','E','A','A','A','C#','B']))"
+            % str(ROOT / 'scripts'))
+        seen = set()
+        for seed in ('1', '2', '3', '4'):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            out = subprocess.run([sys.executable, '-c', script], env=env,
+                                 capture_output=True, text=True, check=True)
+            seen.add(out.stdout.strip())
+        self.assertEqual(len(seen), 1,
+                         f'winner varied with the hash seed: {sorted(seen)}')
+
+    def test_the_root_tie_break_is_the_pitch_name(self):
+        self.assertEqual(f._most_common_root(['E', 'E', 'A', 'A']), 'A')
+        self.assertEqual(f._most_common_root(['B', 'B', 'D', 'D']), 'B')
+        self.assertEqual(f._most_common_root(['G', 'C', 'C']), 'C')
+        self.assertIsNone(f._most_common_root([]))
+
+    def test_loudness_needs_all_three_properties_to_claim_know(self):
+        # loudness is the only axis the narrowed spec clause still lets reach
+        # KNOW, on the grounds that BS.1770-4 fixes every parameter. That
+        # argument covers a complete reading. Two thirds of one is a single
+        # method with a gap in it, which is INFER.
+        import measure as measure_mod
+        real = measure_mod.measure
+
+        def partial(path):
+            local = dict(real(path))
+            local['true_peak_dbtp'] = None
+            return local
+
+        measure_mod.measure = partial
+        try:
+            entry = f.fact_sheet(self.audio, stems_dir=self.stems)['facts']['loudness']
+        finally:
+            measure_mod.measure = real
+        self.assertEqual(entry['confidence'], 'INFER')
+        self.assertIn('true_peak_dbtp', entry['note'])
+        self.assertIsNotNone(entry['value']['lra_lu'])
+
+    def test_a_complete_loudness_reading_is_the_one_axis_that_knows(self):
+        entry = self.sheet()['facts']['loudness']
+        self.assertEqual(entry['confidence'], 'KNOW')
+        for key in ('integrated_lufs', 'lra_lu', 'true_peak_dbtp'):
+            self.assertIsNotNone(entry['value'][key], key)
 
     def test_the_projection_uses_compare_s_own_axis_names(self):
         import compare

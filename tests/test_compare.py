@@ -258,6 +258,44 @@ class TuningAxisTests(unittest.TestCase):
         axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
         self.assertEqual(axis['verdict'], 'UNKNOWN')
 
+    def test_the_pitch_is_folded_wherever_the_name_puts_it(self):
+        # The conventional names put the pitch at either end: 'drop C#' ends
+        # with it, 'Eb standard' begins with it. Folding the last token only
+        # meant Eb and D# were the same pitch spelled two ways and scored FAIL.
+        result = c.score(dict(REFERENCE, tuning='Eb standard'),
+                         dict(REFERENCE, tuning='D# standard'))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'PASS')
+
+    def test_a_string_naming_no_pitch_is_unknown_on_both_sides(self):
+        # The key axis learned this already: any two identical strings compare
+        # equal, so a sentinel matched itself and earned a PASS on an axis
+        # nothing had measured. A tuning with no note name in it is not a
+        # tuning, whatever it is.
+        for value in ('unknown', 'n/a', '', 'banana', 'not a tuning'):
+            with self.subTest(value=value):
+                result = c.score(dict(REFERENCE, tuning=value),
+                                 dict(REFERENCE, tuning=value))
+                axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+                self.assertEqual(axis['verdict'], 'UNKNOWN')
+
+    def test_a_placeholder_tuning_does_not_inflate_the_measured_count(self):
+        # MEASURED exists to stop a sheet that resolved nothing reading as a
+        # sheet that passed. An axis scoring PASS off a placeholder is exactly
+        # the escape hatch that count was added to close.
+        sheet = {'tuning': 'unknown', 'tempo_bpm': 80.7}
+        result = c.score(sheet, dict(sheet))
+        self.assertEqual(result['measured'], 1)
+        self.assertEqual(result['unmeasured'], len(c.GATES) - 1)
+
+    def test_the_word_a_is_a_note_name_but_not_a_tuning(self):
+        # 'a' is both the English article and a note name, so a normaliser
+        # that scans every token for a pitch reads 'not a tuning' as the
+        # tuning 'not tuning A' and passes it against itself. Anchoring the
+        # pitch to either end is what rejects it.
+        self.assertIsNone(c.normalise_tuning('not a tuning'))
+        self.assertEqual(c.normalise_tuning('drop A'), 'drop A')
+
 
 if __name__ == '__main__':
     unittest.main()

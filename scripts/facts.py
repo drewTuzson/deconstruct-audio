@@ -104,11 +104,18 @@ def _match(names, pattern):
 def adopt_stems(folder):
     """Resolve an existing folder of six stems, however its files are named.
 
-    Two passes, tagged first. A name carrying `(Drums)` is claiming to be the
-    drums stem; a name that merely contains the word might be the source mix,
-    a scratch take, or a track called Another Brother. When every stem
-    resolves through the tagged form, the loose form never runs, which is what
-    keeps `Another Brother_(Other).wav` from reading as two claims on `other`.
+    Two passes, tagged first, resolved PER STEM rather than per folder. A name
+    carrying `(Drums)` is claiming to be the drums stem; a name that merely
+    contains the word might be the source mix, a scratch take, or a track
+    called Another Brother. So a stem with a tagged claim uses it and never
+    consults the loose pass, which is what keeps `Another Brother_(Other).wav`
+    from reading as two claims on `other`, and what makes a tagged name beat a
+    stray loose one.
+
+    Per stem is the whole point. Deciding this once for the folder, on whether
+    ANY file used the tagged form, meant a single `(Drums)` file sitting beside
+    five perfectly good plain-name stems switched the entire folder to tagged
+    matching and reported those five as missing.
     """
     folder = Path(folder)
     if not folder.is_dir():
@@ -119,22 +126,25 @@ def adopt_stems(folder):
         raise StemAdoptionError(f'No audio files in {folder}')
 
     tagged = _match(audio, lambda n, low: f'({n})' in low)
-    if any(tagged.values()):
-        found, pass_name = tagged, 'tagged'
-    else:
-        found = _match(audio, lambda n, low: re.search(rf'\b{n}\b', low) is not None)
-        pass_name = 'loose'
+    loose = _match(audio, lambda n, low: re.search(rf'\b{n}\b', low) is not None)
+    found, matched_by = {}, {}
+    for name in stems.STEM_NAMES:
+        found[name] = tagged[name] or loose[name]
+        matched_by[name] = 'tagged' if tagged[name] else 'loose'
 
     missing = sorted(n for n, v in found.items() if not v)
     if missing:
         raise StemAdoptionError(
-            f'{folder} yields no stem for: {", ".join(missing)} (matched by '
-            f'{pass_name} name). A six stem folder is required; a partial one '
-            f'would produce a partial fact sheet, which is worse than none.')
+            f'{folder} yields no stem for: {", ".join(missing)}. Each stem is '
+            f'matched by a parenthesised tag such as (Drums) where one exists, '
+            f'and otherwise by the stem name appearing as a whole word in the '
+            f'filename. A six stem folder is required; a partial one would '
+            f'produce a partial fact sheet, which is worse than none.')
     ambiguous = sorted(n for n, v in found.items() if len(v) > 1)
     if ambiguous:
         detail = '; '.join(
-            f'{n}: ' + ', '.join(p.name for p in found[n]) for n in ambiguous)
+            f'{n} (by {matched_by[n]} name): '
+            + ', '.join(p.name for p in found[n]) for n in ambiguous)
         raise StemAdoptionError(
             f'More than one file claims these stems in {folder}: {detail}. '
             f'Rename or move the extras rather than letting the sheet pick one.')
@@ -281,6 +291,30 @@ def _holds(density, index, typical, hold=INTRO_HOLD):
     return all(density[j] >= typical for j in range(index, index + hold))
 
 
+def _most_common_root(roots):
+    """The most frequent chord root, ties broken by pitch name, or None.
+
+    `sorted` is load bearing and is not decoration. `max(set(roots), ...)`
+    iterates a set, whose order depends on the interpreter's hash seed, so on
+    a track where two roots tie on count the winner changed from process to
+    process. Measured across eight seeds on a tied histogram it returned
+    E,E,E,E,A,A,E,A.
+
+    This value reaches the key fact's grade and its note, both of which are
+    written into facts.json for a person to read, so the instability was
+    emitted content rather than an internal detail.
+
+    The rerun gate cannot see this. corpus_check runs both passes inside one
+    process, which means both share one hash seed, so it reports STABLE=yes
+    for a value that is not stable between runs. A gate blind to the very
+    thing it exists to catch is worth closing even while no corpus track
+    trips it, and the reference track is one bar away from a tie.
+    """
+    if not roots:
+        return None
+    return max(sorted(set(roots)), key=roots.count)
+
+
 def _register(y, sr, fmin, fmax, stem, band, actionable):
     """Median and spread of a pitch track, in MIDI note numbers.
 
@@ -344,7 +378,7 @@ def _key_fact(paths, loaded, mix, sr, local, built):
     # doing real work.
     sequence = (built.get('chords') or {}).get('value') or []
     roots = [e['root'] for e in sequence]
-    common = max(set(roots), key=roots.count) if roots else None
+    common = _most_common_root(roots)
     tonic = result['key'].split()[0]
     agrees = common is not None and common == tonic
     # The mode check. The tonic check above validates WHICH note is home; it
@@ -563,9 +597,25 @@ def _loudness_fact(paths, loaded, mix, sr, local, built):
     if value['lra_lu'] is None:
         return fact(None, 'lu', 'mix', ['ebur128'], 'UNKNOWN', 'indirect',
                     note='ffmpeg returned no loudness summary')
+    # KNOW requires all three. This is the only axis the narrowed spec clause
+    # still admits to KNOW, on the grounds that BS.1770-4 fixes the gating,
+    # the filter, the window and the aggregation, so a second method would
+    # return the same numbers by construction. That argument is about a
+    # COMPLETE reading. Grading the whole three property fact KNOW while two
+    # of them are null claims the standard's authority for values the standard
+    # never produced, and it does so on the one axis where an unearned KNOW
+    # has nothing above it to catch the mistake.
+    missing = sorted(k for k, v in value.items() if v is None)
+    if missing:
+        return fact(value, 'lu', 'mix', ['ebur128'], 'INFER', 'indirect',
+                    note=f'ITU-R BS.1770-4 via ffmpeg, but ffmpeg returned no '
+                         f'{", ".join(missing)}. An incomplete reading is one '
+                         f'method with a gap in it, so this is INFER; the '
+                         f'properties present are still the standard\'s own.')
     return fact(value, 'lu', 'mix', ['ebur128'], 'KNOW', 'indirect',
                 note='ITU-R BS.1770-4 via ffmpeg, the one axis here where a '
-                     'single method is genuinely authoritative')
+                     'single method is genuinely authoritative. All three '
+                     'properties are present, which is what the grade claims.')
 
 
 def _spectral_fact(paths, loaded, mix, sr, local, built):
