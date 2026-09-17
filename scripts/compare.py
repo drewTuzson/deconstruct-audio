@@ -26,6 +26,7 @@ GATES = {
     'low_end_share': {'kind': 'absolute', 'limit': 3.0, 'label': 'Low end share'},
     'section_count': {'kind': 'absolute', 'limit': 1, 'label': 'Section count'},
     'lead_register_midi': {'kind': 'absolute', 'limit': 5, 'label': 'Lead register'},
+    'tuning': {'kind': 'tuning', 'label': 'Tuning'},
 }
 
 
@@ -122,6 +123,28 @@ def key_verdict(reference, candidate):
     return 'FAIL', 'unrelated key'
 
 
+def normalise_tuning(value):
+    """Fold spelling and enharmonics so drop C# and Drop Db are one answer."""
+    if not isinstance(value, str):
+        return None
+    text = ' '.join(value.strip().split()).lower()
+    if not text:
+        return None
+    parts = text.split()
+    tail = parts[-1].upper()
+    parts[-1] = FLATS_TO_SHARPS.get(tail, tail)
+    return ' '.join(parts)
+
+
+def tuning_verdict(reference, candidate):
+    a, b = normalise_tuning(reference), normalise_tuning(candidate)
+    if a is None or b is None:
+        return 'UNKNOWN', 'tuning not parseable'
+    if a == b:
+        return 'PASS', 'same tuning'
+    return 'FAIL', f'{candidate} is not {reference}'
+
+
 def tempo_verdict(reference, candidate):
     # Guarded here rather than only in score(), because tempo_verdict is
     # public and called directly, so the entry point has to be safe too.
@@ -152,6 +175,9 @@ def score(reference, candidate):
             continue
         if gate['kind'] == 'key':
             verdict, note = key_verdict(ref, cand)
+            delta = None
+        elif gate['kind'] == 'tuning':
+            verdict, note = tuning_verdict(ref, cand)
             delta = None
         elif gate['kind'] == 'percent':
             verdict, note, delta = tempo_verdict(ref, cand)

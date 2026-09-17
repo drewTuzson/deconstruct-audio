@@ -248,6 +248,13 @@ class SheetTests(unittest.TestCase):
         for axis in sheet['facts']:
             self.assertIn(axis, text)
 
+    def test_the_projection_uses_compare_s_own_axis_names(self):
+        import compare
+        projected = f.scorable(self.sheet())
+        self.assertTrue(projected)
+        for axis in projected:
+            self.assertIn(axis, compare.GATES, f'{axis} is not a compare axis')
+
     def test_a_partial_stem_folder_refuses_rather_than_emitting_a_partial_sheet(self):
         (self.stems / 'guitar.wav').unlink()
         with self.assertRaises(f.StemAdoptionError):
