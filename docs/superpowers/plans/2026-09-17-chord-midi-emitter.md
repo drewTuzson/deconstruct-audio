@@ -739,9 +739,16 @@ for msg in m.tracks[0][:8]:
 "
 ```
 Expected: `MIDI_WRITTEN=/tmp/progression.mid`, `SUSTAINED_ROOT_BARS=3`, a
-`set_tempo` matching 80 BPM, a first `note_on` at tick 1440 rather than 0
+`set_tempo` matching 80 BPM, a first `note_on` at tick **1920** rather than 0
 because the fixture's first chord starts at 3.0 s, and a length near 15
 seconds. Paste this into the pull request as the after evidence.
+
+At 80 BPM a beat is 0.75 s, so 3.0 s is four beats and 4 x 480 ticks is 1920.
+An earlier draft of this step said 1440, which is 2.25 s, and contradicted the
+test two tasks above it that computes `round(3.0 * ticks_per_beat * 80.0 / 60)`.
+The test was right. If a number in this plan's prose disagrees with a number the
+plan's own code computes, the code is authoritative and the prose is the
+defect.
 
 - [ ] **Step 4: Run the whole suite**
 
