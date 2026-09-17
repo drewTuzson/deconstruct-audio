@@ -1,4 +1,7 @@
 from pathlib import Path
+import json
+import os
+import subprocess
 import re
 import sys
 import tempfile
@@ -656,6 +659,172 @@ class ValidatorTests(unittest.TestCase):
         results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, blind)
         self.assertEqual(check(results, 'banned_words')['verdict'], 'UNKNOWN')
         self.assertEqual(check(results, 'budget')['verdict'], 'UNKNOWN')
+
+
+class ParserTests(unittest.TestCase):
+    def test_the_parser_agrees_with_the_module(self):
+        # Behavioural, not bytecode. The first version of this test read
+        # deconstruct.main.__code__.co_consts for the literal, and CPython only
+        # folds a tuple of constants: putting one non literal into `choices`
+        # unfolds it and the test silently passes on a broken default. The trap
+        # was that the obvious next improvement, sourcing `choices` from
+        # brain.HOLD_OUT_CHOICES, is exactly the change that disables it.
+        import deconstruct
+        parser = deconstruct.build_parser()
+        args = parser.parse_args(['prompt', 'facts.json'])
+        self.assertEqual(args.hold_out, b.HOLD_OUT_DEFAULT)
+        for axis in b.HOLD_OUT_CHOICES:
+            parsed = parser.parse_args(['prompt', 'facts.json',
+                                        '--hold-out', axis])
+            self.assertEqual(parsed.hold_out, axis)
+        parsed = parser.parse_args(['prompt', 'facts.json',
+                                    '--hold-out', 'none'])
+        self.assertEqual(parsed.hold_out, 'none')
+
+    def test_an_unknown_verdict_does_not_exit_zero(self):
+        # The exit code layer of the same rule the validators enforce. A style
+        # whose rules could not be read is not a style that passed, and a
+        # wrapping script gating on the exit code would otherwise spend the
+        # user's money on a prompt nothing checked.
+        import deconstruct
+        self.assertEqual(deconstruct.PROMPT_EXIT['PASS'], 0)
+        self.assertNotEqual(deconstruct.PROMPT_EXIT['UNKNOWN'], 0)
+        self.assertNotEqual(deconstruct.PROMPT_EXIT['FAIL'], 0)
+
+
+class CommandTests(unittest.TestCase):
+    """End to end, through a real process, because the exit code is the point.
+
+    cmd_prompt returns its code rather than raising SystemExit, and main() has
+    to hand that code back out. Checking the two halves separately would miss
+    a dispatch branch that called the command and discarded what it returned,
+    which is how the verdict gets lost between them.
+    """
+
+    def setUp(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.tmp = Path(holder.name)
+        self.private = self.tmp / 'private'
+        self.private.mkdir(mode=0o700)
+        self.out = self.tmp / 'out'
+        self.facts = self.tmp / 'facts.json'
+        self.facts.write_text(json.dumps(FULL_SHEET), encoding='utf-8')
+        self.style = self.tmp / 'style.txt'
+        self.style.write_text(GOOD_STYLE, encoding='utf-8')
+        self.exclude = self.tmp / 'exclude.txt'
+        self.exclude.write_text(GOOD_EXCLUDE, encoding='utf-8')
+
+    def connect(self, instructions=FIXTURE_INSTRUCTIONS):
+        folder = self.tmp / 'brain'
+        folder.mkdir(exist_ok=True)
+        (folder / 'INSTRUCTIONS.txt').write_text(instructions, encoding='utf-8')
+        (self.private / 'config.json').write_text(
+            json.dumps({'brain_path': str(folder)}), encoding='utf-8')
+        return folder
+
+    def run_cli(self, *argv):
+        env = dict(os.environ)
+        env['DECONSTRUCT_AUDIO_CONFIG_DIR'] = str(self.private)
+        env.pop('GEMINI_API_KEY', None)
+        env.pop('GOOGLE_API_KEY', None)
+        return subprocess.run(
+            [sys.executable, str(ROOT / 'scripts' / 'deconstruct.py'), *argv],
+            capture_output=True, text=True, timeout=120, env=env)
+
+    def validated(self, *extra):
+        return self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--style', str(self.style),
+                            '--exclude', str(self.exclude),
+                            '--hold-out', 'none', *extra)
+
+    def test_with_no_style_it_writes_the_slots_and_checks_nothing(self):
+        self.connect()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(f'SLOTS_WRITTEN={self.out / "slots.json"}', done.stdout)
+        self.assertIn('RULES_FROM=INSTRUCTIONS.txt', done.stdout)
+        self.assertIn('HELD_OUT=lead_register', done.stdout)
+        self.assertIn('PROMPT_VERDICT=UNKNOWN', done.stdout)
+        self.assertNotIn('RULE_UNREADABLE', done.stderr)
+        written = json.loads((self.out / 'slots.json').read_text())
+        self.assertEqual(written['held_out'], 'lead_register')
+
+    def test_the_held_out_line_is_printed_even_with_no_control(self):
+        self.connect()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--hold-out', 'none')
+        self.assertIn('HELD_OUT=none', done.stdout)
+
+    def test_a_clean_style_passes_and_exits_zero(self):
+        self.connect()
+        added = [arg for piece in GOOD_DECLARED for arg in ('--added', piece)]
+        done = self.validated(*added)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('PROMPT_VERDICT=PASS', done.stdout)
+        check = json.loads((self.out / 'prompt-check.json').read_text())
+        self.assertEqual(check['verdict'], 'PASS')
+        self.assertEqual(check['mode'], 'custom')
+
+    def test_a_failing_style_is_a_verdict_and_not_a_crash(self):
+        # Exit 2, and no suppression text, because a FAIL must reach the user
+        # as the check that failed rather than as a traceback the handler ate.
+        self.connect()
+        done = self.validated()
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn('PROMPT_VERDICT=FAIL', done.stdout)
+        self.assertIn('FAIL    provenance', done.stdout)
+        self.assertNotIn('Details suppressed', done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+
+    def test_a_brain_whose_rules_cannot_be_read_never_exits_zero(self):
+        self.connect('a rules file with none of the expected labels')
+        added = [arg for piece in GOOD_DECLARED for arg in ('--added', piece)]
+        done = self.validated(*added)
+        self.assertEqual(done.returncode, 4, done.stdout + done.stderr)
+        self.assertIn('PROMPT_VERDICT=UNKNOWN', done.stdout)
+        self.assertIn('RULE_UNREADABLE=banned_words', done.stderr)
+
+    def test_an_unacknowledged_ask_first_reaches_the_user_and_fails(self):
+        self.connect()
+        infer = json.loads(json.dumps(FULL_SHEET))
+        infer['facts']['tempo']['confidence'] = 'INFER'
+        infer['facts']['tempo']['note'] = 'a competing metrical level at 4/3'
+        self.facts.write_text(json.dumps(infer), encoding='utf-8')
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertIn('ASK_FIRST=tempo is graded INFER', done.stdout)
+
+    def test_an_unusable_axis_is_named_rather_than_left_to_be_noticed(self):
+        self.connect()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertIn('UNUSABLE_AXES=', done.stdout)
+        self.assertIn('vocal_register', done.stdout)
+
+    def test_no_brain_connected_is_an_authored_message(self):
+        (self.private / 'config.json').write_text('{}', encoding='utf-8')
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('No Brain is connected', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+
+    def test_a_brain_error_survives_the_top_level_handler(self):
+        # BrainError wrapped in SkillError, or the authored sentence is
+        # replaced by 'Details suppressed to protect secrets'.
+        (self.private / 'config.json').write_text(
+            json.dumps({'brain_path': str(self.tmp / 'nowhere')}),
+            encoding='utf-8')
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('No Brain folder at', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+
+    def test_a_mistyped_fact_sheet_path_is_an_authored_message(self):
+        self.connect()
+        done = self.run_cli('prompt', str(self.tmp / 'missing.json'),
+                            '--out', str(self.out))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('Cannot read the input fact sheet', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
 
 
 if __name__ == '__main__':

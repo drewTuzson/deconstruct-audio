@@ -750,6 +750,105 @@ def cmd_research(args):
                   f'measured={row["measured"]} researched={row["researched"]} '
                   f'authoritative=measured')
 
+def brain_path():
+    """Only brain_path, only from config.json. Never credentials.json.
+
+    references/brain.md requires the pointer to be read through a narrow
+    helper. config() is already that helper: it opens config.json alone, type
+    checks every field it hands back, and raises an authored SkillError rather
+    than letting an unreadable settings file reach the top-level handler.
+    """
+    return config().get('brain_path')
+
+
+# prompt's exit code carries the verdict, the way compare's does, so a wrapping
+# script can gate on it without parsing stdout. UNKNOWN has its own code for
+# the reason COMPARE_EXIT gives: "a rule could not be read" is a different
+# answer from "the prompt is fine", and a gate that conflated them would spend
+# the user's money on a prompt nothing actually checked. 1 stays what it means
+# everywhere else, which is that the command itself failed.
+PROMPT_EXIT = {'PASS': 0, 'FAIL': 2, 'UNKNOWN': 4}
+
+
+def cmd_prompt(args):
+    # brain is imported here, not at module level, for the reason the comment
+    # at the top of this file gives.
+    import brain as brain_mod
+    # read_facts, not json.loads, for the reason cmd_research records: a
+    # mistyped path through a bare json.loads reaches the user as
+    # 'ERROR: FileNotFoundError ... Details suppressed to protect secrets'.
+    sheet = read_facts(args.facts, 'input')
+    path = brain_path()
+    if not path:
+        raise SkillError(
+            'No Brain is connected. Run connect-brain, or compose without one '
+            'and skip this command; it will not invent a format.')
+    try:
+        sources = brain_mod.brain_sources(path)
+        # Whichever instruction source actually carries the labelled rules.
+        # A fixed preference for SYSTEM-PROMPT-FULL.txt was measured backwards
+        # on a real Brain: that file is an assembled document carrying none of
+        # them, so every rule came back unreadable against a Brain that parses
+        # cleanly. See brain.rules_from.
+        source_name, rules = brain_mod.rules_from(sources)
+    except brain_mod.BrainError as exc:
+        # Wrapped, or the top-level handler suppresses the authored message.
+        raise SkillError(str(exc)) from None
+    # Resolved BEFORE slots.json is written, which is the order that stops an
+    # axis being held out after someone has seen which one turned out
+    # inconvenient.
+    hold_out = None if args.hold_out == 'none' else args.hold_out
+    filled = brain_mod.slots(sheet, hold_out=hold_out)
+
+    out = args.out or args.facts.parent
+    out.mkdir(parents=True, exist_ok=True)
+    # write_json, not an inline dumps. The helper owns the atomic mkstemp then
+    # os.replace pattern and the allow_nan=False rule.
+    write_json(out / 'slots.json', filled)
+    print(f'SLOTS_WRITTEN={out / "slots.json"}')
+    print(f'RULES_FROM={source_name}')
+    # Printed unconditionally. Guarding it meant a run with no control emitted
+    # no line at all, and the absence of the control was indistinguishable from
+    # the line having scrolled past. The control is the single thing that turns
+    # a matching generation into evidence rather than a coincidence, so its
+    # absence has to be as loud as its presence.
+    print(f'HELD_OUT={filled.get("held_out") or "none"}')
+    for rule in rules['unreadable']:
+        print(f'RULE_UNREADABLE={rule}', file=sys.stderr)
+    if filled['unusable']:
+        print(f'UNUSABLE_AXES={",".join(sorted(filled["unusable"]))}')
+    for pending in filled.get('ask_first', []):
+        print(f'ASK_FIRST={pending}')
+
+    if not args.style:
+        print('PROMPT_VERDICT=UNKNOWN')
+        print('No style supplied, so nothing was checked. Compose from '
+              'slots.json and rerun with --style to validate.', file=sys.stderr)
+        # Exit 0 here, unlike a checked UNKNOWN below. This mode was not asked
+        # to reach a verdict; it was asked to fill the slots, and it did.
+        return 0
+
+    style = args.style.read_text(encoding='utf-8').strip()
+    exclude = (args.exclude.read_text(encoding='utf-8').strip()
+               if args.exclude else '')
+    results = brain_mod.validate(style, exclude, sheet, rules,
+                                 mode=args.mode, names=tuple(args.name),
+                                 filled=filled, acknowledged=args.acknowledge,
+                                 declared=tuple(args.added),
+                                 dropped=tuple(args.dropped))
+    for entry in results:
+        print(f'{entry["verdict"]:<8}{entry["check"]:<18}{entry["detail"]}')
+    verdicts = [e['verdict'] for e in results]
+    overall = 'FAIL' if 'FAIL' in verdicts else (
+        'UNKNOWN' if 'UNKNOWN' in verdicts else 'PASS')
+    write_json(out / 'prompt-check.json',
+               {'mode': args.mode, 'verdict': overall, 'checks': results})
+    print(f'PROMPT_VERDICT={overall}')
+    # A FAIL is a verdict, not a crash, so this returns its exit code rather
+    # than raising, and the error handler's suppression text never appears.
+    return PROMPT_EXIT[overall]
+
+
 def build_parser():
     """Construct the argument parser.
 
@@ -819,6 +918,51 @@ def build_parser():
                     help='Output file. Defaults to progression.mid beside the fact sheet.')
     mi.add_argument('--octave', type=int, default=3,
                     help='Octave of the chord roots, -1 to 8. Outside that range the root or its fifth leaves the MIDI range, and the command says so rather than moving your music quietly.')
+    pp = sub.add_parser(
+        'prompt',
+        help='Fill the Brain\'s slots from a fact sheet, and check a composed '
+             'style against the Brain\'s own rules.',
+        description='Fill the Brain\'s slots from facts.json alone, and, when '
+                    'given a composed style, check it against the rules read '
+                    'from your own Brain. Exit code carries the verdict: 0 '
+                    'PASS, 2 FAIL, 4 UNKNOWN (a rule could not be read, which '
+                    'is not a pass), 1 the command itself failed.')
+    pp.add_argument('facts', type=Path)
+    pp.add_argument('--mode', choices=('simple', 'custom', 'studio'),
+                    default='custom')
+    pp.add_argument('--style', type=Path, default=None,
+                    help='A composed style prompt to validate.')
+    pp.add_argument('--exclude', type=Path, default=None)
+    pp.add_argument('--name', action='append', default=[],
+                    help='A name that must not appear. Repeatable.')
+    # These repeat brain.HOLD_OUT_DEFAULT and brain.HOLD_OUT_CHOICES rather
+    # than importing them, because deconstruct.py must survive an incomplete
+    # install for doctor's sake; see the comment at line 22. The duplication is
+    # held honest by test_the_parser_agrees_with_the_module, which parses real
+    # arguments through build_parser() instead of inspecting bytecode.
+    pp.add_argument('--hold-out', default='lead_register',
+                    choices=('tempo', 'tuning', 'intro_seconds',
+                             'lead_register', 'spectral_balance', 'none'),
+                    help='Keep one measured axis OUT of the prompt and score '
+                         'it anyway. The control for the exit bar. Defaults to '
+                         'lead_register; pass none to run without a control, '
+                         'which is a weaker result at the same price.')
+    pp.add_argument('--acknowledge', action='store_true',
+                    help='The user has answered every ASK_FIRST question.')
+    pp.add_argument('--added', action='append', default=[],
+                    help='A tag or sentence in the style that is the agent\'s '
+                         'own judgement rather than a measurement, for example '
+                         'a genre or an era. Repeatable. Anything in the style '
+                         'that is neither a slot phrase nor declared here '
+                         'fails provenance.')
+    pp.add_argument('--dropped', action='append', default=[],
+                    help='A slot phrase deliberately left out of the style, '
+                         'usually to fit the character budget. Repeatable. A '
+                         'measured phrase that is neither used nor dropped '
+                         'fails provenance, because a measurement that quietly '
+                         'never reached the prompt is the thing this check '
+                         'exists to surface.')
+    pp.add_argument('--out', type=Path, default=None)
     rp = sub.add_parser('research')
     rp.add_argument('facts', type=Path)
     rp.add_argument('--artist', default='')
@@ -898,6 +1042,11 @@ def main():
         cmd_midi(args)
     elif args.command == 'research':
         cmd_research(args)
+    elif args.command == 'prompt':
+        # Returned, not called and discarded. cmd_prompt's exit code is the
+        # verdict, and `sys.exit(main() or 0)` only sees it if it comes back
+        # through here. compare does the same for the same reason.
+        return cmd_prompt(args)
 
 if __name__ == '__main__':
     for stream in (sys.stdout, sys.stderr):
