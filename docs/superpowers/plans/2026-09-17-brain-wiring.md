@@ -585,6 +585,63 @@ class ValidatorTests(unittest.TestCase):
                                         'It opens quietly', 'It ends loudly'))
         self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
 
+    def test_declaring_the_measured_phrase_too_does_not_rescue_it(self):
+        # The route that survived the first inversion. bpm_placement mandates a
+        # BPM and numbers_trace mandates it trace to a slot, so '81 BPM' is in
+        # every passing prompt by construction. Counting a DECLARED piece as
+        # coming from a measurement let it disable the severance test single
+        # handedly.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box. The piece begins in a stairwell. It ends when the '
+                    'tape runs out.')
+        results = self.run_it(
+            style=invented,
+            declared=('81 BPM', 'converted grain silo reverb',
+                      'hand cranked music box', 'The piece begins in a stairwell',
+                      'It ends when the tape runs out'))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('declared but matching a measured slot', entry['detail'])
+
+    def test_a_measurement_left_out_without_being_dropped_fails(self):
+        # The symmetric half. Accounting for the style is only half a contract:
+        # one slot phrase plus four honest declarations satisfied the first
+        # version while six measurements sat on the floor.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box. The piece begins in a stairwell. It ends when the '
+                    'tape runs out.')
+        results = self.run_it(
+            style=invented,
+            declared=('converted grain silo reverb', 'hand cranked music box',
+                      'The piece begins in a stairwell',
+                      'It ends when the tape runs out'))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('left out without being dropped', entry['detail'])
+
+    def test_a_measurement_named_in_dropped_is_accounted_for(self):
+        # Dropping is legitimate: the Custom budget is 1000 characters and the
+        # slots will not always fit. Naming it is what makes it accountable.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        kept = [p for p in every if 'BPM' in p]
+        results = self.run_it(
+            style='. '.join(kept) + '. It opens quietly.',
+            filled=filled,
+            declared=('It opens quietly',),
+            dropped=tuple(p for p in every if p not in kept))
+        self.assertEqual(check(results, 'provenance')['verdict'], 'PASS')
+
+    def test_the_counts_in_the_note_add_up_to_the_pieces(self):
+        # A reviewer reads this line immediately before approving a spend, and
+        # the earlier version subtracted a set's length from a list's, so a
+        # style repeating one tag reported judgement nobody declared.
+        results = self.run_it(style='81 BPM, 81 BPM, 81 BPM. It opens. It ends.',
+                              declared=('It opens', 'It ends'))
+        detail = check(results, 'provenance')['detail']
+        numbers = [int(n) for n in re.findall(r'(\d+) (?:from|declared|un)', detail)]
+        self.assertEqual(sum(numbers[:4]), 5)
+
     def test_a_phrase_cannot_be_inverted_and_still_count_as_inherited(self):
         # The prefix match let 'roughly 12 seconds of build' and 'roughly 12
         # minutes of total silence' score as the same measurement.
@@ -728,7 +785,7 @@ def _decompose(style):
 
 
 def validate(style, exclude, sheet, rules, mode='custom', names=(),
-             filled=None, acknowledged=False, declared=()):
+             filled=None, acknowledged=False, declared=(), dropped=()):
     """Check a composed prompt against the Brain's own rules.
 
     `filled` is the slots dict the prompt was supposed to be written from. It
@@ -848,24 +905,68 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
     tags, sentences = _decompose(style)
     pieces = [(t, _canonical(t)) for t in tags] + \
              [(s, _canonical(s)) for s in sentences]
-    undeclared = [raw for raw, key in pieces
-                  if key not in slot_phrases and key not in spoken]
-    used = sorted({key for _, key in pieces if key in slot_phrases})
+
+    # Four buckets, and a piece lands in exactly one of them. The earlier
+    # version had two and a membership test that ignored `spoken`, so a
+    # DECLARED piece still counted as coming from a measurement. Declaring
+    # every piece including the BPM then passed, because the BPM matched a slot
+    # and the severance guard only fired when NOTHING matched. That is the
+    # mirror of the defect it replaced: bpm_placement mandates a BPM that
+    # traces to a slot, so `81 BPM` is in every passing prompt by construction,
+    # and it was single handedly disabling the severance test.
+    #
+    # A declared piece is judgement BY THE AGENT'S OWN ACCOUNT. Taking that at
+    # face value is the safe reading: an agent that disowns every measured
+    # phrase has told you its prompt carries no measurements, and the check
+    # should agree with it rather than overrule it.
+    from_slots, contested, judgement, undeclared = [], [], [], []
+    for raw, key in pieces:
+        in_slots, was_declared = key in slot_phrases, key in spoken
+        if in_slots and was_declared:
+            contested.append(raw)
+        elif in_slots:
+            from_slots.append(raw)
+        elif was_declared:
+            judgement.append(raw)
+        else:
+            undeclared.append(raw)
+
+    # The other direction. Accounting for every piece of the STYLE is only
+    # half a contract: a prompt using one slot phrase and honestly declaring
+    # four inventions satisfied it while leaving six measurements on the floor.
+    # So every slot phrase must also be accounted for, by appearing in the
+    # style or by being named in `dropped`.
+    #
+    # Dropping is legitimate and common: the Custom budget is 1000 characters
+    # and the slots will not always fit. Naming what was dropped costs the
+    # agent one flag and turns "the measurements did not reach the prompt" from
+    # something a reader has to notice into something the check says.
+    shed = {_canonical(d) for d in dropped}
+    present = {key for _, key in pieces}
+    unused = sorted(p for p in slot_phrases if p not in present and p not in shed)
+
+    note = (f'{len(from_slots)} from measurements, {len(judgement)} declared '
+            f'as judgement, {len(contested)} declared but matching a measured '
+            f'slot, {len(undeclared)} unaccounted, {len(unused)} slot phrases '
+            f'silently unused')
     if undeclared:
         results.append(_result(
             'provenance', 'FAIL',
-            f'{len(undeclared)} of {len(pieces)} pieces trace to neither a '
-            f'measurement nor a declared judgement: {undeclared}'))
-    elif not used:
+            f'{note}. Traces to neither a measurement nor a declared '
+            f'judgement: {undeclared}'))
+    elif not from_slots:
         results.append(_result(
             'provenance', 'FAIL',
-            'every piece was declared as judgement and not one came from a '
-            'measurement, so nothing connects this prompt to the fact sheet'))
-    else:
+            f'{note}. Not one piece came from a measurement the agent did not '
+            f'also claim as its own, so nothing connects this prompt to the '
+            f'fact sheet'
+            + (f'. Declared but measured: {contested}' if contested else '')))
+    elif unused:
         results.append(_result(
-            'provenance', 'PASS',
-            f'{len(used)} pieces from measurements, '
-            f'{len(pieces) - len(used)} declared as judgement'))
+            'provenance', 'FAIL',
+            f'{note}. Measured and left out without being dropped: {unused}'))
+    else:
+        results.append(_result('provenance', 'PASS', note))
 
     # An INFER tempo that nobody acknowledged must not reach a generation.
     pending = filled.get('ask_first') or []
@@ -904,7 +1005,7 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 40 tests
+Expected: PASS, 45 tests
 
 If `test_a_clean_style_passes_every_check_it_can_run` fails, read which check
 failed and fix the validator, not the fixture, unless the fixture genuinely
@@ -1228,7 +1329,7 @@ missing.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 51 tests
+Expected: PASS, 56 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1319,7 +1420,8 @@ def cmd_prompt(args):
     results = brain_mod.validate(style, exclude, sheet, rules,
                                  mode=args.mode, names=tuple(args.name),
                                  filled=filled, acknowledged=args.acknowledge,
-                                 declared=tuple(args.added))
+                                 declared=tuple(args.added),
+                                 dropped=tuple(args.dropped))
     for entry in results:
         print(f'{entry["verdict"]:<8}{entry["check"]:<18}{entry["detail"]}')
     verdicts = [e['verdict'] for e in results]
@@ -1362,6 +1464,13 @@ With the other parsers in `main()`:
                          'a genre or an era. Repeatable. Anything in the style '
                          'that is neither a slot phrase nor declared here '
                          'fails provenance.')
+    pp.add_argument('--dropped', action='append', default=[],
+                    help='A slot phrase deliberately left out of the style, '
+                         'usually to fit the character budget. Repeatable. A '
+                         'measured phrase that is neither used nor dropped '
+                         'fails provenance, because a measurement that quietly '
+                         'never reached the prompt is the thing this check '
+                         'exists to surface.')
     pp.add_argument('--out', type=Path, default=None)
 ```
 
@@ -1478,12 +1587,26 @@ PASS was equally consistent with the measurement path carrying the result and
 with an agent writing a good prompt from prose. Two additions make the
 difference observable.
 
-**Provenance.** Every number in the style must trace to a phrase in
-`slots.json`, and at least one slot phrase must appear in the style. That is
-what `numbers_trace` and `provenance` check, and it is why `slot_numbers` reads
-the slots rather than the facts. The command writes `slots.json` before it will
-validate anything, so the difference between the slots and the style is on disk
-and a reader can see what the prompt inherited and what it invented.
+**Provenance, as a contract that closes in both directions.** Every piece of
+the style is accounted for: it matches a slot phrase, meaning it came from a
+measurement, or the agent declared it through `--added` as its own judgement.
+And every slot phrase is accounted for: it appears in the style, or the agent
+named it in `--dropped`. Anything unaccounted on either side fails.
+
+The style is then exactly what was measured plus what the agent admits it
+added, and the measurements that did not reach the prompt are listed rather
+than inferred from their absence. `numbers_trace` sits alongside it and is
+genuinely independent: a declared judgement carrying a number passes provenance
+and fails `numbers_trace`.
+
+Three earlier versions of this check were theatre, which is worth recording
+because each looked reasonable. The first asked whether ANY slot phrase
+appeared, and a style about a converted grain silo sharing one tag passed; it
+was also not independent, because `bpm_placement` mandates the phrase that
+satisfied it. The second counted a DECLARED piece as coming from a measurement,
+so declaring everything including the BPM passed. The third accounted for the
+style but not for the slots, so one slot phrase plus four honest declarations
+passed while six measurements sat unused.
 
 **A held out axis.** `--hold-out` keeps one measured axis out of the prompt
 while the scorer still measures it on both sides. The default is
@@ -1500,6 +1623,7 @@ Read the result as a pair, not as one verdict:
 | miss | misses | The prompt did not steer the generation. Nothing downstream is validated |
 | miss | matches | The prompt steered the generation AWAY from the reference while the unanchored axis landed on its own. The worst result, and the only one that says a carried axis is actively harmful |
 | any | UNKNOWN | Unreadable. `_register` returns UNKNOWN below sixteen voiced frames, which is exactly what a thin generated guitar produces, so the control can fail to report at all. Hold out a different axis and generate again, or accept that this run measured nothing about provenance |
+| UNKNOWN | any | Also unreadable, and check this first. A carried axis coming back UNKNOWN on the generation means that axis was not compared at all, so read `MEASURED=` before reading the verdict. A thin generation can take several axes out at once |
 
 The exit bar is met by the first row only.
 
