@@ -210,9 +210,15 @@ def extract_rules(text):
     return rules
 
 
-# The Brain's rule is that a ruled out trait becomes its positive opposite.
-# Three words do not cover that. Measured: 'absent', 'free of', 'never' and
-# 'excluding' all passed a validator claiming to enforce it.
+# The Brain wants a trait excluded by naming the quality that should stand in
+# its place, so this has to catch every way a writer reaches for the reverse
+# instead. Three words do not cover that. Measured: 'absent', 'free of',
+# 'never' and 'excluding' all passed a validator claiming to enforce it.
+#
+# Described rather than quoted, deliberately. An earlier version of this
+# comment restated the rule close enough to the Brain's own sentence to share
+# a run of its words, which put licensed wording in the history for no gain: a
+# paraphrase of a rule is not what enforces it, the list below is.
 #
 # This list will never be complete, and the check is therefore a floor rather
 # than a proof. It is still worth having, because every entry is a phrase a
@@ -521,6 +527,21 @@ def _quantities(text):
     provenance as judgement, so the command approved a duration the fact sheet
     never established. Pairing the number with its unit is the difference
     between 'this number appears in the sheet' and 'this measurement does'.
+
+    ONE DOOR IS DELIBERATELY LEFT OPEN, and it is written down here so the
+    next person finds it rather than discovers it. The unit is checked, the
+    subject it attaches to is not. The intro slot says 'roughly 12 seconds of
+    build', so '12 seconds of total silence' traces cleanly: same number, same
+    unit, opposite claim about the music.
+
+    That is disclosure rather than prevention, and it is the same position
+    this pipeline takes on the tuning axis. Closing it would mean parsing what
+    each phrase is about, which is judgement. Leaving it open costs nothing
+    hidden, because provenance still forces that sentence into `--added`: it
+    is not a slot phrase, so it fails unless the agent declares it, and it
+    then sits in the declared list a human reads out before the money is
+    spent. The check that catches it is a person, and the contract is what
+    puts it in front of them.
     """
     return {(int(number), (unit or '').lower())
             for number, unit in QUANTITY.findall(str(text))}
@@ -708,14 +729,20 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 
     # Every number traces to a slot phrase. Every number, including single
     # digits, which the earlier \d{2,4} pattern never looked at.
+    # Both fields, not just the style. The exclude field is prompt content
+    # like any other and it reaches the generator the same way, so
+    # '909 drum machine, 1987 gated reverb' was quoting two numbers nothing
+    # measured and passing, because only the style was ever read here.
     traceable = slot_quantities(filled)
-    quoted = _quantities(style)
+    quoted = _quantities(style) | _quantities(exclude)
     orphans = sorted(f'{number} {unit}'.strip()
-                     for number, unit in quoted if (number, unit) not in traceable)
+                     for number, unit in quoted
+                     if (number, unit) not in traceable)
     results.append(_result(
         'numbers_trace', 'FAIL' if orphans else 'PASS',
         f'orphans {orphans}' if orphans
-        else f'{len(quoted)} measurements, all traced to a slot'))
+        else f'{len(quoted)} measurements across both fields, all traced to '
+             f'a slot'))
 
     # Provenance, as a contract rather than a coincidence counter.
     #

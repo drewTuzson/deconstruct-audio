@@ -12,19 +12,32 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import brain as b
 
 # A synthetic rules file. Invented for this test. Contains no third party text.
+#
+# The banned words, every heading and all of the connecting prose are made up.
+# What is NOT made up, and cannot be, is the handful of label tokens the
+# extractor keys on: the four mode names, `Target N to N characters`, `cap N`,
+# `limit N characters, target N to N`, `Limit N`, `Fatigue words banned`, and
+# `Never:`. Those same strings are the regexes in scripts/brain.py, because a
+# parser for a document has to name the labels it parses. A fixture that
+# reworded them would pass while proving nothing about the file this runs
+# against, which is the shape of check this project exists to refuse.
+#
+# So the rule for editing this fixture is: the label tokens stay, everything
+# around them is invented. An earlier version had the decoration copied too,
+# and shared runs of six to nine words with the real Brain for no gain.
 FIXTURE_INSTRUCTIONS = """
-## FIRST: ASK THE MODE
-- SIMPLE: one long style prompt ONLY. Target 1,800 to 2,600 characters
-  (box cap 3,000).
-- CUSTOM (Advanced): style prompt HARD limit 1,000 characters, target 850 to 950.
-- STUDIO: one element only. Limit 1,000.
+## STEP ONE: CHOOSE A MODE
+- SIMPLE: one field, nothing else. Target 1,800 to 2,600 characters
+  (outer cap 3,000).
+- CUSTOM (Layered): the style field has a limit 1,000 characters, target 850 to 950.
+- STUDIO: a lone element. Limit 1,000.
 
-## BANNED AND SWAPPED WORDS
-Fatigue words banned in styles AND lyrics: wibbly, frobnicate, sparkletastic.
+## WORDS THE FIXTURE REFUSES
+Fatigue words banned anywhere a reader looks: wibbly, frobnicate, sparkletastic.
 Never: "in the manner of", "sort of like".
 
-## VOCALS, NEGATION, EXCLUDE
-EXCLUDE: positive keywords only. Target 180 to 200 characters.
+## SINGING, OPPOSITES, THE EXCLUDE FIELD
+EXCLUDE: name what you want there. Target 180 to 200 characters.
 """
 
 
@@ -81,9 +94,10 @@ class SourceChoiceTests(unittest.TestCase):
         # Half the rules in each file. Taking the better of the two is still
         # one file, so the rules the chosen file lacks stay unreadable rather
         # than being quietly borrowed from the other.
-        budgets_only, banned_only = FIXTURE_INSTRUCTIONS.split('## BANNED')
+        marker = '## WORDS'
+        budgets_only, banned_only = FIXTURE_INSTRUCTIONS.split(marker)
         _, rules = b.rules_from({'SYSTEM-PROMPT-FULL.txt': budgets_only,
-                                 'INSTRUCTIONS.txt': '## BANNED' + banned_only})
+                                 'INSTRUCTIONS.txt': marker + banned_only})
         self.assertTrue(rules['unreadable'])
 
     def test_a_brain_with_no_instruction_source_is_an_error(self):
@@ -117,10 +131,10 @@ class RuleExtractionTests(unittest.TestCase):
         # The shape that defeated the first anchored version: the modes are
         # named on one line, so a fixed window from CUSTOM runs into SIMPLE's
         # budget and returns cap 3000 with nothing in unreadable.
-        text = ('Ask the mode: SIMPLE, CUSTOM, STUDIO.\n'
-                '- STUDIO: one element.\n'
-                '- SIMPLE: Target 2,000 to 2,500 characters (box cap 3,000).\n'
-                '- CUSTOM (Advanced): style prompt HARD limit 1,000 '
+        text = ('Pick one of SIMPLE, CUSTOM, STUDIO.\n'
+                '- STUDIO: a lone element.\n'
+                '- SIMPLE: Target 2,000 to 2,500 characters (outer cap 3,000).\n'
+                '- CUSTOM (Layered): the style field has a limit 1,000 '
                 'characters, target 850 to 950.')
         rules = b.extract_rules(text)
         self.assertEqual(rules['budgets']['custom']['cap'], 1000)
@@ -128,8 +142,8 @@ class RuleExtractionTests(unittest.TestCase):
 
     def test_a_longer_word_containing_a_mode_name_is_not_that_mode(self):
         text = ('You may CUSTOMISE the output.\n'
-                '- SIMPLE: Target 2,000 to 2,500 characters (box cap 3,000).\n'
-                '- CUSTOM (Advanced): style prompt HARD limit 1,000 '
+                '- SIMPLE: Target 2,000 to 2,500 characters (outer cap 3,000).\n'
+                '- CUSTOM (Layered): the style field has a limit 1,000 '
                 'characters, target 850 to 950.')
         self.assertEqual(b.extract_rules(text)['budgets']['custom']['cap'], 1000)
 
@@ -140,8 +154,8 @@ class RuleExtractionTests(unittest.TestCase):
         # UNREADABLE on the most ordinary shape there is. Widening it is safe
         # because the window is already bounded by the next mode; the case
         # below proves that boundary still holds.
-        text = ('- SIMPLE: one long style prompt ONLY. Target 1,800 to 2,600 '
-                'characters\n  (box cap 3,000).')
+        text = ('- SIMPLE: one field, nothing else. Target 1,800 to 2,600 '
+                'characters\n  (outer cap 3,000).')
         rules = b.extract_rules(text)
         self.assertEqual(rules['budgets']['simple']['target'], (1800, 2600))
         self.assertEqual(rules['budgets']['simple']['cap'], 3000)
@@ -151,7 +165,7 @@ class RuleExtractionTests(unittest.TestCase):
         # The conservative half of the trade. An unreadable rule is reported
         # and a human widens the pattern. A confidently wrong budget ships a
         # prompt the Brain rejects after the generation is paid for.
-        text = ('- CUSTOM (Advanced):\n  style prompt\n  HARD\n'
+        text = ('- CUSTOM (Layered):\n  the style field\n  has a\n'
                 '  limit 1,000 characters, target 850 to 950.')
         rules = b.extract_rules(text)
         self.assertIs(rules['budgets']['custom']['cap'], b.UNREADABLE)
@@ -160,7 +174,7 @@ class RuleExtractionTests(unittest.TestCase):
     def test_a_banned_list_that_parses_to_nothing_is_unreadable(self):
         # An empty tuple reports as a rule read cleanly and then passes every
         # string: a validator switched off behind a green light.
-        rules = b.extract_rules('Fatigue words banned in styles AND lyrics: .')
+        rules = b.extract_rules('Fatigue words banned anywhere a reader looks: .')
         self.assertIs(rules['banned_words'], b.UNREADABLE)
         self.assertIn('banned_words', rules['unreadable'])
 
@@ -419,7 +433,7 @@ MEASURED_SENTENCE = ('The song opens on roughly 12 seconds of build before the '
 GOOD_TAGS = ('Rock', 'Post Hardcore', 'defiant', 'urgent', '81 BPM',
              'drop C sharp tuned rhythm guitar',
              'very low register lead guitar figure', 'heavy low end',
-             'static harmony', 'thick distorted bass', 'punchy kick drum',
+             'static harmony', 'thick distorted bass', 'blunt kick thud',
              'group shout vocals', 'one lead vocalist only',
              'wide room reverb', 'driving eighth note pulse',
              'raw analogue warmth', 'tight gated snare',
@@ -449,8 +463,8 @@ GOOD_EXCLUDE = ('bright major key, clean jazz guitar, smooth crooner vocals, '
 # clears the budget check too, which is what makes the drop branch observable in
 # context rather than behind an unrelated failure.
 NARROW = FIXTURE_INSTRUCTIONS.replace(
-    'HARD limit 1,000 characters, target 850 to 950',
-    'HARD limit 150 characters, target 100 to 150')
+    'limit 1,000 characters, target 850 to 950',
+    'limit 150 characters, target 100 to 150')
 
 
 def rules():
@@ -522,7 +536,7 @@ class ValidatorTests(unittest.TestCase):
 
     def test_a_style_with_no_direction_prose_fails(self):
         tags_only = ('Rock, Post Hardcore, defiant, urgent, 81 BPM, downtuned '
-                     'rhythm guitar, thick distorted bass, punchy kick drum, '
+                     'rhythm guitar, thick distorted bass, blunt kick thud, '
                      'group shout vocals, ') * 3
         results = self.run_it(style=tags_only)
         self.assertEqual(check(results, 'direction_prose')['verdict'], 'FAIL')
@@ -597,6 +611,26 @@ class ValidatorTests(unittest.TestCase):
 
     def test_the_same_number_under_its_own_unit_still_traces(self):
         results = self.run_it()
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
+
+    def test_a_number_in_the_exclude_field_is_traced_too(self):
+        # The exclude field is prompt content like any other and reaches the
+        # generator the same way, so a model number nobody measured was
+        # passing because only the style was read.
+        exclude = ('909 drum machine, 1987 gated reverb, bright major key, '
+                   'clean jazz guitar, smooth crooner vocals, dance pop '
+                   'production, orchestral strings, spoken word, swing rhythm')
+        results = self.run_it(exclude=exclude)
+        entry = check(results, 'numbers_trace')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('909', entry['detail'])
+        self.assertIn('1987', entry['detail'])
+
+    def test_a_measured_number_may_appear_in_the_exclude_field(self):
+        # The rule is that a number traces, not that the exclude field is
+        # barred from carrying one.
+        exclude = GOOD_EXCLUDE.replace('swing rhythm', '81 bpm swing')
+        results = self.run_it(exclude=exclude)
         self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
 
     def test_a_supplied_name_anywhere_in_either_field_fails(self):
