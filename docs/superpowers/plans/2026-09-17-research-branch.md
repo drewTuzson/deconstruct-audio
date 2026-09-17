@@ -13,6 +13,8 @@
 ## Global Constraints
 
 - Python 3.10 or newer.
+- **Import `research` inside `cmd_research`, never at module level.** See the comment at `scripts/deconstruct.py:22`. `research.py` is standard library only today, so this costs nothing, but the rule is about the file it is being added to, not about this module's weight.
+- **Wrap `ResearchError` in `SkillError`.** The top-level handler at `scripts/deconstruct.py:730` prints authored text only for `SkillError`; anything else becomes `ERROR: <TypeName> ... Details suppressed to protect secrets`. Without the wrap, the message "an unsourced claim is a memory" never reaches the user, which defeats the point of writing it.
 - Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`.
 - Baseline is 97 tests, OK, one skipped. Any drop is a regression.
 - `research.py` imports nothing outside the standard library and makes no network call.
@@ -402,11 +404,16 @@ def cmd_research(args):
     if args.claims:
         raw = json.loads(args.claims.read_text(encoding='utf-8'))
         if not isinstance(raw, list):
-            raise SystemExit('--claims must hold a JSON array of claim objects')
-    claims = [research_mod.claim(
-        c['axis'], c['value'], c['source'], c['confidence'], c.get('note'))
-        for c in raw]
-    rec = research_mod.record(args.artist, args.title, claims)
+            raise SkillError('--claims must hold a JSON array of claim objects')
+    try:
+        claims = [research_mod.claim(
+            c['axis'], c['value'], c['source'], c['confidence'], c.get('note'))
+            for c in raw]
+        rec = research_mod.record(args.artist, args.title, claims)
+    except research_mod.ResearchError as exc:
+        raise SkillError(str(exc)) from None
+    except KeyError as exc:
+        raise SkillError(f'a claim in {args.claims} is missing {exc}') from None
     out = args.out or args.facts.parent
     out.mkdir(parents=True, exist_ok=True)
     (out / 'research.json').write_text(

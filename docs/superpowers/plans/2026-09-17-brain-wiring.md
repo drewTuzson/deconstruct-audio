@@ -13,6 +13,9 @@
 ## Global Constraints
 
 - Python 3.10 or newer.
+- **Import `brain` inside `cmd_prompt`, never at module level.** See the comment at `scripts/deconstruct.py:22`.
+- **Wrap `BrainError` in `SkillError`.** The handler at `scripts/deconstruct.py:730` suppresses any other exception's message. See the research plan for the same rule.
+- **`cmd_prompt` returns its exit code, it does not raise `SystemExit`.** Check how `cmd_compare` at `scripts/deconstruct.py:588` returns `COMPARE_EXIT` and follow that, so a FAIL verdict is a verdict rather than a crash.
 - Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`.
 - Baseline is 97 tests, OK, one skipped. Any drop is a regression.
 - **No Brain text in this repository.** Not in code, not in comments, not in a test fixture. The Brain is licensed third party material. Tests run against a synthetic fixture Brain the test writes itself.
@@ -912,10 +915,13 @@ def cmd_prompt(args):
     sheet = json.loads(args.facts.read_text(encoding='utf-8'))
     path = brain_path()
     if not path:
-        raise SystemExit(
+        raise SkillError(
             'No Brain is connected. Run connect-brain, or compose without one '
             'and skip this command; it will not invent a format.')
-    sources = brain_mod.brain_sources(path)
+    try:
+        sources = brain_mod.brain_sources(path)
+    except brain_mod.BrainError as exc:
+        raise SkillError(str(exc)) from None
     text = sources.get('SYSTEM-PROMPT-FULL.txt') or sources['INSTRUCTIONS.txt']
     rules = brain_mod.extract_rules(text)
     filled = brain_mod.slots(sheet)
@@ -950,7 +956,9 @@ def cmd_prompt(args):
                    indent=2), encoding='utf-8')
     print(f'PROMPT_VERDICT={overall}')
     if overall == 'FAIL':
-        raise SystemExit(2)
+        # A FAIL is a verdict, not a crash, so it exits non-zero without the
+        # error handler's suppression text. Wrapping scripts gate on this.
+        return 2
 ```
 
 - [ ] **Step 3: Register and dispatch**
