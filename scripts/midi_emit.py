@@ -36,9 +36,18 @@ MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
 # bars where the winning root beat the runner up by less than five percent.
 # That is the condition a sustained root is FOR.
 #
-# Task 3 Step 5 re-measures this against the real sheets, before Task 4 runs the
-# command end to end. If the distribution argues for a different cut, use it and
-# say why.
+# The plan asks for that distribution to be re-measured here against the real
+# corpus sheets. It could not be: at the time this landed no sheet existed to
+# measure, because the command that writes them had not been built. The three
+# track figures above are not mine. They are the critic's, recorded in
+# CRITIC-plan-review-r3.md, and at 1.05 that same review counted 8 of 45, 12 of
+# 65 and 12 of 53 bars flagged, which is 32 of 163. Treat them as inherited
+# rather than confirmed until the corpus sheets land, and re-run the sweep then.
+#
+# What survives without the sheets is the reason for the number, which does not
+# depend on any distribution: a margin of exactly 1.0 is a tie between two pitch
+# classes, so 1.05 flags the bars where the winning root beat the runner up by
+# less than five percent. That is the condition a sustained root is FOR.
 MIN_MARGIN = 1.05
 
 

@@ -193,5 +193,45 @@ class FileTests(unittest.TestCase):
         return out
 
 
+import os
+
+
+@unittest.skipUnless(os.environ.get('DECONSTRUCT_AUDIO_FACTS'),
+                     'set DECONSTRUCT_AUDIO_FACTS to a real facts.json')
+class RealSheetTests(unittest.TestCase):
+    """The fixture proves the emitter agrees with its author. This proves it
+    agrees with the fact sheet."""
+
+    def setUp(self):
+        self.sheet = json.loads(
+            Path(os.environ['DECONSTRUCT_AUDIO_FACTS']).read_text(encoding='utf-8'))
+
+    def test_the_sheet_carries_every_field_the_contract_names(self):
+        facts = self.sheet['facts']
+        self.assertIn('tempo', facts)
+        self.assertIn('chords', facts)
+        for entry in facts['chords']['value']:
+            for key in ('start_s', 'end_s', 'root', 'quality',
+                        'root_share', 'root_margin', 'third_present'):
+                self.assertIn(key, entry)
+
+    def test_it_writes_a_clip_from_a_real_sheet(self):
+        mid = m.progression(self.sheet)
+        self.assertGreater(mid.length, 1.0)
+
+    def test_the_clip_starts_at_the_first_measured_chord(self):
+        mid = m.progression(self.sheet)
+        first_start = float(self.sheet['facts']['chords']['value'][0]['start_s'])
+        absolute = 0
+        for msg in mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                break
+        seconds = mido.tick2second(
+            absolute, mid.ticks_per_beat,
+            mido.bpm2tempo(float(self.sheet['facts']['tempo']['value'])))
+        self.assertAlmostEqual(seconds, first_start, delta=0.05)
+
+
 if __name__ == '__main__':
     unittest.main()
