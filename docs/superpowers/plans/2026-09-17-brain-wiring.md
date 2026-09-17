@@ -792,7 +792,7 @@ def _usable(sheet, axis):
 def slots(sheet):
     """Measurements to prompt phrases. An UNKNOWN never becomes a phrase."""
     out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
-           'direction': [], 'midi_only': [], 'unusable': []}
+           'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': []}
     for axis, entry in (sheet or {}).get('facts', {}).items():
         if entry.get('confidence') == 'UNKNOWN' or entry.get('value') is None:
             out['unusable'].append(axis)
@@ -800,6 +800,13 @@ def slots(sheet):
     tempo = _usable(sheet, 'tempo')
     if tempo:
         out['moods'].append(f'{round(float(tempo["value"]))} BPM')
+        # See THE TEMPO RULE below. _usable already drops an UNKNOWN tempo, so
+        # nothing reaches here without a value, but an INFER tempo whose family
+        # holds a competing metrical level is a minority reading and the agent
+        # must not silently turn it into a tag.
+        if tempo['confidence'] != 'KNOW':
+            out['ask_first'].append(
+                f'tempo is graded {tempo["confidence"]}: {tempo.get("note")}')
 
     tuning = _usable(sheet, 'tuning')
     if tuning:
@@ -848,6 +855,35 @@ def slots(sheet):
         out['midi_only'].append(f'key, {key["value"]}, supplied as MIDI')
     return out
 ```
+
+## THE TEMPO RULE
+
+`facts.scorable()` projects the tempo family's `primary`, and `tempo.grade()`
+takes that primary from the tempogram unconditionally. The other two methods
+can lower the confidence grade and can never change the value.
+
+On the reference track all three methods agree and this is invisible. On Wrong
+Turn the tempogram says 80.7 while beat tracking and inter onset intervals both
+say 107.7, so the primary is a minority vote. The sheet reports it correctly:
+grade `INFER`, 107.7 in the family labelled `4/3`, disagreement in the note.
+
+`INFER` is a grade on the sheet. It is not a warning that survives the
+projection, and a prompt is written from the projection.
+
+So, before a BPM reaches the moods cluster:
+
+1. `KNOW`: use the primary.
+2. `INFER`: `slots` puts the grade and the note into `ask_first`. The agent
+   surfaces it and asks which metrical level to use. It does not choose.
+3. `UNKNOWN`: `_usable` drops it and no BPM is emitted at all. A tag stack
+   without a BPM is a smaller failure than one that anchors the generation to
+   the wrong metrical level.
+
+**Do not fix this by filtering in `scorable()`.** That was considered and
+rejected on measurement. The reference track's own tempo fact carries four
+competing levels, one at relative strength 0.90, so any threshold low enough to
+catch Wrong Turn also drops `tempo_bpm` on Murder She Wrote and fails the entry
+bar. The projection is not the place. This is.
 
 **One warning that belongs here rather than in the fact sheet.** The tuning
 axis reports the lowest sustained semitone in the bass, and a sub octave pitch
