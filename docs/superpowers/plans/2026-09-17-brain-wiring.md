@@ -222,6 +222,27 @@ def _int(token):
     return int(str(token).replace(',', ''))
 
 
+MODE_WINDOW_LINES = 3
+
+
+def _near(text, token, pattern):
+    """Search for `pattern` only in the lines around `token`.
+
+    Anchoring matters more than the pattern does. A `.*?` span under re.S will
+    happily cross half a document to find something that looks like a budget
+    and return it with no indication that it came from the wrong section.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if token not in line:
+            continue
+        window = '\n'.join(lines[index:index + MODE_WINDOW_LINES])
+        found = re.search(pattern, window)
+        if found:
+            return found
+    return None
+
+
 def brain_sources(path):
     """Every readable source in a Brain folder, keyed by relative name."""
     folder = Path(path)
@@ -249,41 +270,53 @@ def extract_rules(text):
     """Locate each rule in the Brain text. Never guess one that is not there."""
     rules = {'budgets': {}, 'unreadable': []}
 
-    simple = re.search(
-        rf'SIMPLE:.*?[Tt]arget\s+{NUMBER}\s+to\s+{NUMBER}\s+characters'
-        rf'.*?cap\s+{NUMBER}', text, re.S)
+    # Every one of these is anchored to the MODE'S OWN LINES, never spanning
+    # the document with `.*?` and re.S.
+    #
+    # The span version was measured wrong and, worse, wrong without saying so.
+    # On a Brain that names its modes before defining them, the CUSTOM pattern
+    # ran from the first `CUSTOM` token to the first budget clause it found
+    # anywhere after it, and returned cap 3000 with target (2000, 2500) instead
+    # of cap 1000 with target (850, 950). It did not appear in `unreadable`.
+    # A 2400 character style then passes the budget check green and the Brain
+    # rejects it after the generation is paid for.
+    simple = _near(text, 'SIMPLE',
+                   rf'[Tt]arget\s+{NUMBER}\s+to\s+{NUMBER}\s+characters'
+                   rf'[^\n]*?cap\s+{NUMBER}')
     rules['budgets']['simple'] = (
         {'target': (_int(simple.group(1)), _int(simple.group(2))),
          'cap': _int(simple.group(3))} if simple
         else {'target': UNREADABLE, 'cap': UNREADABLE})
 
-    custom = re.search(
-        rf'CUSTOM.*?limit\s+{NUMBER}\s+characters,\s+target\s+{NUMBER}\s+to\s+'
-        rf'{NUMBER}', text, re.S)
+    custom = _near(text, 'CUSTOM',
+                   rf'limit\s+{NUMBER}\s+characters,\s+target\s+{NUMBER}'
+                   rf'\s+to\s+{NUMBER}')
     rules['budgets']['custom'] = (
         {'target': (_int(custom.group(2)), _int(custom.group(3))),
          'cap': _int(custom.group(1))} if custom
         else {'target': UNREADABLE, 'cap': UNREADABLE})
 
-    studio = re.search(rf'STUDIO:.*?[Ll]imit\s+{NUMBER}', text, re.S)
+    studio = _near(text, 'STUDIO', rf'[Ll]imit\s+{NUMBER}')
     rules['budgets']['studio'] = (
         {'target': None, 'cap': _int(studio.group(1))} if studio
         else {'target': UNREADABLE, 'cap': UNREADABLE})
 
     banned = re.search(r'[Ff]atigue words banned[^:]*:\s*([^\n.]+)', text)
-    rules['banned_words'] = (
-        tuple(w.strip().lower() for w in banned.group(1).split(',') if w.strip())
-        if banned else UNREADABLE)
+    words = tuple(w.strip().lower()
+                  for w in banned.group(1).split(',') if w.strip()) if banned else ()
+    # An empty parse is UNREADABLE, never an empty tuple. A tuple of nothing
+    # reports as a rule that was read cleanly and then passes every string,
+    # which is a validator that has been switched off while showing a green
+    # light. That is the single most dangerous shape a check can take.
+    rules['banned_words'] = words if words else UNREADABLE
 
-    phrases = re.findall(r'"([^"\n]{3,40})"', text)
     never = re.search(r'\bNever:\s*([^\n]+)', text)
-    rules['banned_phrases'] = (
-        tuple(p.strip().strip('"').lower()
-              for p in re.findall(r'"([^"]+)"', never.group(1)))
-        if never else UNREADABLE)
+    found = tuple(p.strip().strip('"').lower()
+                  for p in re.findall(r'"([^"]+)"', never.group(1))) if never else ()
+    rules['banned_phrases'] = found if found else UNREADABLE
 
-    exclude = re.search(rf'EXCLUDE:.*?[Tt]arget\s+{NUMBER}\s+to\s+{NUMBER}',
-                        text, re.S)
+    exclude = _near(text, 'EXCLUDE',
+                    rf'[Tt]arget\s+{NUMBER}\s+to\s+{NUMBER}')
     rules['exclude_budget'] = (
         (_int(exclude.group(1)), _int(exclude.group(2))) if exclude
         else UNREADABLE)
@@ -475,7 +508,17 @@ Expected: FAIL, `AttributeError: module 'brain' has no attribute 'validate'`
 Append to `scripts/brain.py`:
 
 ```python
-NEGATION_WORDS = ('no', 'not', 'without')
+# The Brain's rule is that a ruled out trait becomes its positive opposite.
+# Three words do not cover that. Measured: 'absent', 'free of', 'never' and
+# 'excluding' all passed a validator claiming to enforce it.
+#
+# This list will never be complete, and the check is therefore a floor rather
+# than a proof. It is still worth having, because every entry is a phrase a
+# prompt writer actually reaches for.
+NEGATION_WORDS = ('no', 'not', 'without', 'never', 'absent', 'lacking',
+                  'excluding', 'except', 'minus', 'sans', 'devoid', 'neither',
+                  'nor', 'none', 'avoid', 'omit', 'exclude', 'free of',
+                  'free from', 'stripped of', 'rather than', 'instead of')
 HYPHEN_EXCEPTIONS = re.compile(
     r'\b[A-Z]-[A-Za-z]+\b'          # letter prefix genres such as J-Pop
     r'|\[[^\]]*\]')                 # bracketed tags
@@ -494,33 +537,45 @@ def _found_words(text, words):
     return [w for w in words if re.search(rf'\b{re.escape(w)}\b', low)]
 
 
-def _fact_numbers(sheet):
-    """Every number the sheet measured, as a set of rounded forms."""
+def slot_numbers(filled):
+    """Every number that appears in a slot phrase.
+
+    The traceable set is the SLOTS, not the facts. Three reasons, and the
+    second one is a measured defect rather than a preference.
+
+    The prompt is supposed to be written from slots.json. Tracing against the
+    slots is therefore the same question as 'did this come from the fact
+    sheet', which is the claim the exit bar makes and could not previously
+    check.
+
+    The earlier version traced against the facts AND blessed the double and the
+    half of every one of them. On a track measured at 80.7 that made 161 a
+    traceable number, which is the exact 2x metrical level this track reports
+    at relative strength 0.90: the one wrong tempo most likely to be written,
+    waved through by the check meant to catch it. Across the integers 10 to
+    200, 19.45 percent traced by coincidence.
+
+    And it skipped single digit numbers entirely, so a prompt could say
+    '7 sections' on a sheet whose section count is UNKNOWN.
+    """
     out = set()
-
-    def add(value):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return
-        out.add(round(float(value)))
-        out.add(round(float(value) * 2))
-        out.add(round(float(value) / 2))
-
-    for entry in (sheet or {}).get('facts', {}).values():
-        if entry.get('confidence') == 'UNKNOWN':
-            continue
-        value = entry.get('value')
-        if isinstance(value, dict):
-            for inner in value.values():
-                add(inner)
-        elif isinstance(value, list):
-            for inner in value:
-                add(inner)
-        else:
-            add(value)
+    for key in ('moods', 'instruments', 'vocals', 'production', 'direction'):
+        for phrase in filled.get(key, []):
+            for token in re.findall(r'\d+', str(phrase)):
+                out.add(int(token))
     return out
 
 
-def validate(style, exclude, sheet, rules, mode='custom', names=()):
+def validate(style, exclude, sheet, rules, mode='custom', names=(),
+             filled=None, acknowledged=False):
+    """Check a composed prompt against the Brain's own rules.
+
+    `filled` is the slots dict the prompt was supposed to be written from. It
+    is an argument rather than recomputed here so the caller checks the SAME
+    slots it handed the agent, including any held out axis.
+    """
+    if filled is None:
+        filled = slots(sheet)
     results = []
     style = style or ''
     exclude = exclude or ''
@@ -597,12 +652,49 @@ def validate(style, exclude, sheet, rules, mode='custom', names=()):
             f'BPM at character {bpm_at} of a {len(first_sentence)} character '
             f'tag stack'))
 
-    # Every number traces to a fact
-    measured = _fact_numbers(sheet)
-    quoted = {int(n) for n in re.findall(r'\b(\d{2,4})\b', style)}
-    orphans = sorted(n for n in quoted if n not in measured)
-    results.append(_result('numbers_trace', 'FAIL' if orphans else 'PASS',
-                           ', '.join(str(n) for n in orphans)))
+    # Every number traces to a slot phrase. Every number, including single
+    # digits, which the earlier \d{2,4} pattern never looked at.
+    traceable = slot_numbers(filled)
+    quoted = {int(n) for n in re.findall(r'\d+', style)}
+    orphans = sorted(n for n in quoted if n not in traceable)
+    results.append(_result(
+        'numbers_trace', 'FAIL' if orphans else 'PASS',
+        f'orphans {orphans}' if orphans
+        else f'{len(quoted)} numbers, all traced to a slot'))
+
+    # Provenance. This is what makes "written from the fact sheet alone" a
+    # checkable claim rather than an assertion, and it is why the exit bar was
+    # redesigned: a style written from listening.md prose passed every other
+    # validator identically.
+    used, unused = [], []
+    for key in ('moods', 'instruments', 'vocals', 'production', 'direction'):
+        for phrase in filled.get(key, []):
+            core = phrase.rstrip('.').strip().lower()
+            (used if core[:28] in body else unused).append(phrase)
+    if not used:
+        results.append(_result(
+            'provenance', 'FAIL',
+            'not one slot phrase appears in the style, so nothing connects '
+            'this prompt to the measurements'))
+    else:
+        results.append(_result(
+            'provenance', 'PASS',
+            f'{len(used)} of {len(used) + len(unused)} slot phrases present; '
+            f'unused: {unused}'))
+
+    # An INFER tempo that nobody acknowledged must not reach a generation.
+    pending = filled.get('ask_first') or []
+    if pending and not acknowledged:
+        results.append(_result(
+            'ask_first', 'FAIL',
+            '; '.join(pending) + '. Rerun with --acknowledge once the user has '
+            'answered, or this prompt anchors the generation to a reading the '
+            'sheet itself flagged as a minority.'))
+    elif pending:
+        results.append(_result('ask_first', 'PASS',
+                               f'{len(pending)} acknowledged'))
+    else:
+        results.append(_result('ask_first', 'PASS', 'nothing to ask'))
 
     # No names
     both = f'{body} {exclude.lower()}'
@@ -789,15 +881,35 @@ def _usable(sheet, axis):
     return entry
 
 
-def slots(sheet):
-    """Measurements to prompt phrases. An UNKNOWN never becomes a phrase."""
+HOLD_OUT_DEFAULT = 'lead_register'
+
+
+def slots(sheet, hold_out=None):
+    """Measurements to prompt phrases. An UNKNOWN never becomes a phrase.
+
+    `hold_out` names one measured axis to deliberately keep OUT of the prompt.
+    It is the control for the exit bar.
+
+    Without it, a generation matching the reference is consistent with the fact
+    sheet doing the work and equally consistent with an agent writing a good
+    prompt from prose, and the bar cannot tell those apart. With it, the axes
+    that reached the prompt and the one that did not are scored separately. If
+    the carried axes match and the held out one does not, the sheet is what
+    carried the result. If everything matches equally well, something other
+    than the prompt is driving it and the bar has told you so.
+
+    `lead_register` is the default because the parent spec records four
+    generation cycles lost to an intro arriving an octave high, which makes it
+    the axis most likely to drift when nothing anchors it.
+    """
     out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
-           'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': []}
+           'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': [],
+           'held_out': hold_out}
     for axis, entry in (sheet or {}).get('facts', {}).items():
         if entry.get('confidence') == 'UNKNOWN' or entry.get('value') is None:
             out['unusable'].append(axis)
 
-    tempo = _usable(sheet, 'tempo')
+    tempo = None if hold_out == 'tempo' else _usable(sheet, 'tempo')
     if tempo:
         out['moods'].append(f'{round(float(tempo["value"]))} BPM')
         # See THE TEMPO RULE below. _usable already drops an UNKNOWN tempo, so
@@ -808,13 +920,13 @@ def slots(sheet):
             out['ask_first'].append(
                 f'tempo is graded {tempo["confidence"]}: {tempo.get("note")}')
 
-    tuning = _usable(sheet, 'tuning')
+    tuning = None if hold_out == 'tuning' else _usable(sheet, 'tuning')
     if tuning:
         out['instruments'].append(
             f'{str(tuning["value"]).replace("#", " sharp")} tuned rhythm guitar'
             .replace('-', ' '))
 
-    lead = _usable(sheet, 'lead_register')
+    lead = None if hold_out == 'lead_register' else _usable(sheet, 'lead_register')
     if lead:
         label = _band(float(lead['value']['median_midi']), REGISTER_BANDS,
                       'very high register')
@@ -826,7 +938,8 @@ def slots(sheet):
                       'very high register')
         out['vocals'].append(f'{label} lead vocal')
 
-    spectral = _usable(sheet, 'spectral_balance')
+    spectral = (None if hold_out == 'spectral_balance'
+                else _usable(sheet, 'spectral_balance'))
     if spectral:
         out['production'].append(
             _band(float(spectral['value']['low_end_share']), LOW_END_BANDS,
@@ -836,16 +949,36 @@ def slots(sheet):
     if harmonic:
         out['production'].append(f'{harmonic["value"]["label"]} harmony')
 
-    intro = _usable(sheet, 'intro_seconds')
-    sections = _usable(sheet, 'sections')
+    intro = None if hold_out == 'intro_seconds' else _usable(sheet, 'intro_seconds')
+    # section_count, not sections. The fact sheet split that axis: boundaries
+    # are INFER and the count is UNKNOWN by construction, because sixteen
+    # segmentation methods failed to generalise. Reading the old name returns
+    # None silently, which cost the direction prose its second sentence while
+    # the Brain requires two to three. The agent was then quietly expected to
+    # invent one, which is the exact failure this whole pipeline exists to stop.
+    sections = _usable(sheet, 'section_count')
+    boundaries = _usable(sheet, 'section_boundaries')
     if intro:
         out['direction'].append(
             f'The song opens on roughly {round(float(intro["value"]))} seconds '
             f'of build before the full arrangement lands.')
     if sections:
         out['direction'].append(
-            f'It moves through about {int(sections["value"]["count"])} distinct '
+            f'It moves through about {int(sections["value"])} distinct '
             f'sections and ends without a fade.')
+    elif boundaries and len(boundaries['value']) >= 2:
+        # The count is UNKNOWN, but the boundaries are real and the Brain needs
+        # a second direction sentence. This says what was measured, the shape,
+        # without stating a count nothing earned.
+        spans = [b - a for a, b in zip(boundaries['value'],
+                                       boundaries['value'][1:])]
+        longest = max(spans) if spans else 0
+        out['direction'].append(
+            f'It changes texture several times, with its longest unbroken '
+            f'stretch running about {round(longest)} seconds, and ends without '
+            f'a fade.')
+    if len(out['direction']) < 2:
+        out['unusable'].append('direction_prose_second_sentence')
 
     chords = _usable(sheet, 'chords')
     if chords:
@@ -974,17 +1107,21 @@ def cmd_prompt(args):
         raise SkillError(str(exc)) from None
     text = sources.get('SYSTEM-PROMPT-FULL.txt') or sources['INSTRUCTIONS.txt']
     rules = brain_mod.extract_rules(text)
-    filled = brain_mod.slots(sheet)
+    filled = brain_mod.slots(sheet, hold_out=args.hold_out)
 
     out = args.out or args.facts.parent
     out.mkdir(parents=True, exist_ok=True)
     (out / 'slots.json').write_text(
         json.dumps(filled, indent=2, allow_nan=False), encoding='utf-8')
     print(f'SLOTS_WRITTEN={out / "slots.json"}')
+    if filled.get('held_out'):
+        print(f'HELD_OUT={filled["held_out"]}')
     for rule in rules['unreadable']:
         print(f'RULE_UNREADABLE={rule}', file=sys.stderr)
     if filled['unusable']:
         print(f'UNUSABLE_AXES={",".join(sorted(filled["unusable"]))}')
+    for pending in filled.get('ask_first', []):
+        print(f'ASK_FIRST={pending}')
 
     if not args.style:
         print('PROMPT_VERDICT=UNKNOWN')
@@ -995,7 +1132,8 @@ def cmd_prompt(args):
     style = args.style.read_text(encoding='utf-8').strip()
     exclude = args.exclude.read_text(encoding='utf-8').strip() if args.exclude else ''
     results = brain_mod.validate(style, exclude, sheet, rules,
-                                 mode=args.mode, names=tuple(args.name))
+                                 mode=args.mode, names=tuple(args.name),
+                                 filled=filled, acknowledged=args.acknowledge)
     for entry in results:
         print(f'{entry["verdict"]:<8}{entry["check"]:<18}{entry["detail"]}')
     verdicts = [e['verdict'] for e in results]
@@ -1025,6 +1163,13 @@ With the other parsers in `main()`:
     pp.add_argument('--exclude', type=Path, default=None)
     pp.add_argument('--name', action='append', default=[],
                     help='A name that must not appear. Repeatable.')
+    pp.add_argument('--hold-out', default=None,
+                    choices=('tempo', 'tuning', 'intro_seconds',
+                             'lead_register', 'spectral_balance'),
+                    help='Keep one measured axis OUT of the prompt and score '
+                         'it anyway. The control for the exit bar.')
+    pp.add_argument('--acknowledge', action='store_true',
+                    help='The user has answered every ASK_FIRST question.')
     pp.add_argument('--out', type=Path, default=None)
 ```
 
@@ -1125,6 +1270,65 @@ git commit -m "docs: the prompt command"
 ```
 
 ---
+
+---
+
+## The exit bar
+
+One generation, whose prompt the Brain wrote from the fact sheet alone, scoring
+PASS on tempo, key and intro length with low end share and loudness range inside
+their limits.
+
+That was the bar as first stated, and it does not measure what it says. The
+prompt is a free text file and nothing checked where its contents came from, so
+a style written from `listening.md` prose passes every validator identically. A
+PASS was equally consistent with the measurement path carrying the result and
+with an agent writing a good prompt from prose. Two additions make the
+difference observable.
+
+**Provenance.** Every number in the style must trace to a phrase in
+`slots.json`, and at least one slot phrase must appear in the style. That is
+what `numbers_trace` and `provenance` check, and it is why `slot_numbers` reads
+the slots rather than the facts. The command writes `slots.json` before it will
+validate anything, so the difference between the slots and the style is on disk
+and a reader can see what the prompt inherited and what it invented.
+
+**A held out axis.** `--hold-out` keeps one measured axis out of the prompt
+while the scorer still measures it on both sides. The default is
+`lead_register`, because the parent spec records four generation cycles lost to
+an intro arriving an octave high, which makes it the axis most likely to drift
+when nothing anchors it.
+
+Read the result as a pair, not as one verdict:
+
+| Carried axes | Held out axis | What it means |
+|---|---|---|
+| match | misses | The fact sheet carried the result. This is the outcome the project claims |
+| match | also matches | Something other than the prompt is driving it. The bar has told you the test is weak, which is worth more than a PASS |
+| miss | anything | The prompt did not steer the generation, and nothing downstream is validated |
+
+The exit bar is met by the first row only.
+
+**What this still cannot do.** It cannot prove the agent never read
+`listening.md`. It can only show that everything measurable in the style traces
+to the slots. And the generator is not deterministic, so one generation is one
+sample: a single PASS is evidence, not proof, and the report must say which.
+
+### Before anything is spent
+
+The generation costs the user money, so these come first, in this order.
+
+1. Run `prompt` on the reference fact sheet with no style, and confirm zero
+   `RULE_UNREADABLE` lines against the real Brain. A budget parsed wrong is a
+   prompt the Brain rejects after the credits are gone.
+2. Answer every `ASK_FIRST` line with the user, then rerun with
+   `--acknowledge`. An `INFER` tempo carrying a competing metrical level at 0.90
+   relative strength is the most expensive thing on this list to get wrong.
+3. Compose the style from `slots.json`, then run `prompt --style` until
+   `PROMPT_VERDICT=PASS`. Every individual check must read PASS. An `UNKNOWN`
+   verdict means a rule could not be read, not that it passed.
+4. Only then ask the user to approve the spend, and say in the same breath which
+   axis is held out and what each of the three outcomes above would mean.
 
 ## Self-Review
 
