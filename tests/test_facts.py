@@ -143,5 +143,116 @@ class StemAdoptionTests(unittest.TestCase):
         self.assertTrue(result['other'].name.endswith('(Other).wav'))
 
 
+import json
+import subprocess
+
+
+def synth_track(path, seconds=32):
+    """A click, a low drone and a mid tone. No copyrighted audio in the repo.
+
+    32 seconds, not 16. measure.py sets k from duration // 15, so a 16 second
+    fixture yields k = 1 and no section boundaries at all. That made
+    test_section_boundaries_are_still_emitted read UNKNOWN when the code was
+    right, and, more importantly, it left the intro snap branch with no test
+    coverage whatsoever. The snap is the branch that produces the headline
+    12.12, and it is on the axis that has been wrong in four consecutive
+    versions.
+    """
+    subprocess.run([
+        'ffmpeg', '-v', 'error', '-y',
+        '-f', 'lavfi', '-i', f'sine=frequency=110:duration={seconds}',
+        '-f', 'lavfi', '-i', f'sine=frequency=440:duration={seconds}',
+        '-f', 'lavfi', '-i', f'anoisesrc=d={seconds}:c=pink:a=0.3',
+        '-filter_complex', '[0][1][2]amix=inputs=3',
+        '-ar', '22050', '-ac', '1', str(path)], check=True)
+
+
+class SheetTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+        self.audio = self.dir / 'track.wav'
+        synth_track(self.audio)
+        self.stems = self.dir / 'stems'
+        self.stems.mkdir()
+        for name in ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other'):
+            (self.stems / f'{name}.wav').write_bytes(self.audio.read_bytes())
+
+    def sheet(self):
+        return f.fact_sheet(self.audio, stems_dir=self.stems)
+
+    def test_every_fact_carries_method_and_confidence(self):
+        sheet = self.sheet()
+        self.assertTrue(sheet['facts'])
+        for axis, entry in sheet['facts'].items():
+            self.assertTrue(entry['method'], f'{axis} has no method')
+            self.assertIn(entry['confidence'], f.CONFIDENCE, axis)
+            self.assertIn(entry['suno_actionable'], f.ACTIONABLE, axis)
+
+    def test_the_sheet_names_its_schema_and_its_source(self):
+        sheet = self.sheet()
+        self.assertEqual(sheet['schema'], f.SCHEMA)
+        self.assertEqual(len(sheet['source']['sha256']), 64)
+        self.assertEqual(sheet['stems_from'], 'adopted')
+
+    def test_the_whole_sheet_serialises_without_allow_nan(self):
+        json.dumps(self.sheet(), allow_nan=False)
+
+    def test_two_runs_on_the_same_audio_agree_apart_from_the_timestamp(self):
+        first, second = self.sheet(), self.sheet()
+        first.pop('generated_at')
+        second.pop('generated_at')
+        self.assertEqual(json.dumps(first, sort_keys=True),
+                         json.dumps(second, sort_keys=True))
+
+    def test_an_unknown_axis_is_left_out_of_the_projection_not_passed_as_null(self):
+        sheet = self.sheet()
+        sheet['facts']['key'] = f.fact(None, 'name', 'guitar', ['chroma'],
+                                       'UNKNOWN', 'direct')
+        self.assertNotIn('key', f.scorable(sheet))
+
+    def test_harmonic_rhythm_is_unknown_when_it_reports_its_own_floor(self):
+        # A run length is an integer of at least 1, so a median of 1.0 means
+        # the root changed in every bar. All three corpus tracks report exactly
+        # that. An axis reporting its own floor has measured noise.
+        entry = self.sheet()['facts']['harmonic_rhythm']
+        if entry['confidence'] != 'UNKNOWN':
+            self.assertNotEqual(entry['value']['median_chord_bars'], 1.0)
+        else:
+            self.assertIn('every bar', entry['note'])
+
+    def test_section_count_is_unknown_and_says_why(self):
+        entry = self.sheet()['facts']['section_count']
+        self.assertEqual(entry['confidence'], 'UNKNOWN')
+        self.assertIsNone(entry['value'])
+        self.assertIn('generalise', entry['note'])
+
+    def test_section_boundaries_are_still_emitted(self):
+        entry = self.sheet()['facts']['section_boundaries']
+        self.assertEqual(entry['confidence'], 'INFER')
+        self.assertIsInstance(entry['value'], list)
+
+    def test_a_silent_stem_is_reported_absent_rather_than_failing(self):
+        import numpy as np
+        import soundfile as sf
+        y, sr = sf.read(self.stems / 'piano.wav')
+        sf.write(self.stems / 'piano.wav', np.zeros_like(y), sr)
+        entry = f.fact_sheet(self.audio, stems_dir=self.stems)['facts']['instrumentation']
+        self.assertEqual(entry['confidence'], 'INFER')
+        self.assertFalse(entry['value']['piano']['active'])
+
+    def test_the_markdown_names_every_axis_and_its_grade(self):
+        sheet = self.sheet()
+        text = f.render_markdown(sheet)
+        for axis in sheet['facts']:
+            self.assertIn(axis, text)
+
+    def test_a_partial_stem_folder_refuses_rather_than_emitting_a_partial_sheet(self):
+        (self.stems / 'guitar.wav').unlink()
+        with self.assertRaises(f.StemAdoptionError):
+            f.fact_sheet(self.audio, stems_dir=self.stems)
+
+
 if __name__ == '__main__':
     unittest.main()
