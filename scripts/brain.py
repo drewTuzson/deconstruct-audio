@@ -374,7 +374,7 @@ _TEMPO_LEVEL = re.compile(
 
 
 def _decimal(token):
-    """A number written as text, or None.
+    r"""A number written as text, or None.
 
     The note is prose, so `[\d.]+` can hand back something like '1.2.3' that
     float() refuses. A number this cannot read is a level that is not offered,
