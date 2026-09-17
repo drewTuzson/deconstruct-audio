@@ -19,12 +19,19 @@ sits in `/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17/
 
 ## Global Constraints
 
-**Every declared test count in this plan has been wrong at least once.** Three
-revisions in, the counts are the most frequently defective thing in the
-document. They are kept because a count is a tripwire for a silently dropped
-test, but treat them as a tripwire, not as truth: run the suite, and if your
-number disagrees, say so in the pull request with the output rather than
-editing a test to reach the number.
+**Treat every number in this plan's prose as a tripwire, not as truth.** Two
+classes of them have been wrong repeatedly across four revisions.
+
+Test counts, wrong in three revisions running. Kept because a count catches a
+silently dropped test. If yours disagrees, put the output in the pull request
+rather than editing a test to reach the number.
+
+Evidence tables, wrong in one revision and more dangerous when they are. The
+intro axis's table was transcribed from a review of a rule that differed from
+the shipped one by a single search window, and four of its nine rows were
+wrong while reading as verified. A table is evidence about the rule that was
+actually run. If you change a rule, re-run its table; if you cannot, delete the
+table rather than leaving it attached to something it never measured.
 
 
 - Python 3.10 or newer. `ffmpeg` and `ffprobe` on `PATH`.
@@ -1154,8 +1161,17 @@ import json
 import subprocess
 
 
-def synth_track(path, seconds=16):
-    """A click, a low drone and a mid tone. No copyrighted audio in the repo."""
+def synth_track(path, seconds=32):
+    """A click, a low drone and a mid tone. No copyrighted audio in the repo.
+
+    32 seconds, not 16. measure.py sets k from duration // 15, so a 16 second
+    fixture yields k = 1 and no section boundaries at all. That made
+    test_section_boundaries_are_still_emitted read UNKNOWN when the code was
+    right, and, more importantly, it left the intro snap branch with no test
+    coverage whatsoever. The snap is the branch that produces the headline
+    12.12, and it is on the axis that has been wrong in four consecutive
+    versions.
+    """
     subprocess.run([
         'ffmpeg', '-v', 'error', '-y',
         '-f', 'lavfi', '-i', f'sine=frequency=110:duration={seconds}',
@@ -1204,18 +1220,21 @@ class SheetTests(unittest.TestCase):
         self.assertEqual(json.dumps(first, sort_keys=True),
                          json.dumps(second, sort_keys=True))
 
-    def test_the_projection_uses_compare_s_own_axis_names(self):
-        import compare
-        projected = f.scorable(self.sheet())
-        self.assertTrue(projected)
-        for axis in projected:
-            self.assertIn(axis, compare.GATES, f'{axis} is not a compare axis')
-
     def test_an_unknown_axis_is_left_out_of_the_projection_not_passed_as_null(self):
         sheet = self.sheet()
         sheet['facts']['key'] = f.fact(None, 'name', 'guitar', ['chroma'],
                                        'UNKNOWN', 'direct')
         self.assertNotIn('key', f.scorable(sheet))
+
+    def test_harmonic_rhythm_is_unknown_when_it_reports_its_own_floor(self):
+        # A run length is an integer of at least 1, so a median of 1.0 means
+        # the root changed in every bar. All three corpus tracks report exactly
+        # that. An axis reporting its own floor has measured noise.
+        entry = self.sheet()['facts']['harmonic_rhythm']
+        if entry['confidence'] != 'UNKNOWN':
+            self.assertNotEqual(entry['value']['median_chord_bars'], 1.0)
+        else:
+            self.assertIn('every bar', entry['note'])
 
     def test_section_count_is_unknown_and_says_why(self):
         entry = self.sheet()['facts']['section_count']
@@ -1234,7 +1253,7 @@ class SheetTests(unittest.TestCase):
         y, sr = sf.read(self.stems / 'piano.wav')
         sf.write(self.stems / 'piano.wav', np.zeros_like(y), sr)
         entry = f.fact_sheet(self.audio, stems_dir=self.stems)['facts']['instrumentation']
-        self.assertEqual(entry['confidence'], 'KNOW')
+        self.assertEqual(entry['confidence'], 'INFER')
         self.assertFalse(entry['value']['piano']['active'])
 
     def test_the_markdown_names_every_axis_and_its_grade(self):
@@ -1292,20 +1311,39 @@ ACTIVE_DB = -40.0
 INTRO_SNAP_S = 4.0
 # An intro lives near the beginning. Without a window, a post breakdown re
 # entry two thirds of the way through a track competes with it and wins.
-# INTRO_WINDOW_S is a count of one second windows, and the two coincide only
-# because `window = int(sr)` below. If the window size ever changes, convert.
-INTRO_WINDOW_S = 60.0
-INTRO_WINDOW_FRACTION = 0.4
-# The working density of the mix. Deliberately not the median: an intro that
-# occupies half or more of the track makes the median equal to the intro's own
-# density, and the no-intro guard then fires on the longest intros.
-INTRO_TYPICAL_PERCENTILE = 75
+# The working density of the mix, and how long it must be held to count.
+#
+# The percentile is 90, not the median and not 75. Any percentile at or below
+# the share of the track the intro occupies makes the intro's own density the
+# working density, and the no-intro guard then fires on exactly the tracks with
+# the longest intros. The median failed at 50 percent, 75 failed on a track
+# that is 77 percent sparse, 90 and 95 both pass every shape tested.
+#
+# The hold exists because a single touch is not an arrangement. A one second
+# full band stab before the real entry is a genre commonplace, and a rule that
+# ends the intro at the first window merely REACHING the working density is
+# fooled by it in the same way the previous largest step rule was fooled by a
+# large early step.
+#
+# Both constants are deliberately far from any edge: the rule returns the same
+# answer on all three corpus tracks at percentile 90 and 95 and at hold 2, 3, 4
+# and 5. A rule whose answer does not move across that range is reading the
+# arrangement rather than its own constants.
+INTRO_TYPICAL_PERCENTILE = 90
+INTRO_HOLD = 3
 # The winning beat grouping must beat the runner up by this ratio. Measured: on
 # the reference track 3 scores 16526.6 against 4 at 14573.1, a ratio of 1.134,
 # and the axis reads 3 on two of three tracks in a genre whose prior is
 # overwhelmingly 4/4. Below this margin the axis says UNKNOWN rather than
 # shipping a coin toss into a prompt as a statement.
 METER_MARGIN = 1.15
+
+# How many tonic rooted bars must carry a measured third before the mode half
+# of the key cross check is allowed to support a KNOW. Measured: across 163
+# corpus bars only five are tonic rooted AND carry a third, so on this material
+# the check abstains on two tracks of three and caps the grade on the third.
+# That is the intended behaviour: absent evidence caps, it does not promote.
+MODE_EVIDENCE_MIN = 4
 
 SECTION_COUNT_NOTE = (
     'Sixteen structure segmentation methods were run at one fixed '
@@ -1358,6 +1396,17 @@ def _beat_times(drums, sr, bpm):
     return librosa.frames_to_time(beats, sr=sr)
 
 
+def _holds(density, index, typical, hold=INTRO_HOLD):
+    """True when the arrangement reaches the working density here and stays.
+
+    One window at the working density is not an arrangement. It is a stab, a
+    cymbal swell, or a sample. The hold is what separates the two, and it is
+    the single change that closed the last four intro failures.
+    """
+    end = min(len(density), index + hold)
+    return all(density[j] >= typical for j in range(index, end))
+
+
 def _register(y, sr, fmin, fmax, stem, band, actionable):
     """Median and spread of a pitch track, in MIDI note numbers.
 
@@ -1407,7 +1456,10 @@ def _instrumentation_fact(paths, loaded, mix, sr, local, built):
                     'active': bool(math.isfinite(db) and db >= loudest - PRESENCE_DB)}
              for name, db in levels.items()}
     present = sorted(n for n, v in value.items() if v['active'])
-    return fact(value, 'dbfs', 'all', ['stem-rms'], 'KNOW', 'direct',
+    # INFER, not KNOW. PRESENCE_DB is a chosen parameter, and moving it from
+    # 30 to 35 changed which stems this axis reports on two of three corpus
+    # tracks. A declared parameter is not the same as no parameter.
+    return fact(value, 'dbfs', 'all', ['stem-rms'], 'INFER', 'direct',
                 note=f'present: {", ".join(present)}. A stem more than '
                      f'{PRESENCE_DB:g} dB below the loudest reads absent, which '
                      f'is a measurement of the arrangement, not a separation '
@@ -1440,15 +1492,36 @@ def _key_fact(paths, loaded, mix, sr, local, built):
     common = max(set(roots), key=roots.count) if roots else None
     tonic = result['key'].split()[0]
     agrees = common is not None and common == tonic
-    grade = 'KNOW' if (result['margin'] >= 0.05 and agrees) else 'INFER'
+    # The mode check. The tonic check above validates WHICH note is home; it
+    # cannot see major against minor at all. Measured across the corpus, only
+    # five bars in 163 are rooted on their tonic and carry a measured third,
+    # and on the one track where that evidence exists it contradicts the
+    # reported mode three to nil.
+    #
+    # So the mode evidence caps the grade and never changes the answer. It can
+    # only lower KNOW to INFER. Acting on three bars filtered through
+    # THIRD_RATIO, a constant that has never seen a distorted guitar, would be
+    # the tail wagging the dog.
+    mode = result['key'].split()[-1]
+    tonic_thirds = [e['quality'] for e in sequence
+                    if e['root'] == tonic and e.get('third_present')]
+    mode_agrees = (len(tonic_thirds) >= MODE_EVIDENCE_MIN
+                   and tonic_thirds.count(mode) * 2 > len(tonic_thirds))
+    grade = 'KNOW' if (result['margin'] >= 0.05 and agrees and mode_agrees) \
+        else 'INFER'
     runner = result['scores'][1][0] if len(result['scores']) > 1 else 'none'
     return fact(result['key'], 'name', 'guitar+bass',
                 ['chroma-cqt-krumhansl', 'chord-root-histogram'], grade,
                 'direct', band_hz=band,
                 note=f'margin {result["margin"]} over the runner up {runner}; '
                      f'most common chord root {common}, tonic {tonic}, '
-                     f'{"agree" if agrees else "disagree"}. These are template '
-                     f'correlations, not probabilities.')
+                     f'{"agree" if agrees else "disagree"}; '
+                     f'{len(tonic_thirds)} tonic rooted bars carry a third '
+                     f'({tonic_thirds.count(mode)} of them {mode}), which is '
+                     f'{"enough to support" if mode_agrees else "not enough to support"} '
+                     f'the mode. These are template correlations, not '
+                     f'probabilities, and the mode evidence can only lower this '
+                     f'grade, never change the key.')
 ```
 
 ```python
@@ -1512,6 +1585,18 @@ def _harmonic_rhythm_fact(paths, loaded, mix, sr, local, built):
                     'UNKNOWN', 'indirect', band_hz=band,
                     note='no chord sequence to measure a rate over')
     result = chords_mod.harmonic_rhythm(sequence)
+    if result['median_chord_bars'] == 1.0:
+        # 1.0 is the FLOOR of this statistic. A run length is an integer of at
+        # least 1, so a median of 1.0 means the measured root changed in every
+        # single bar. An axis reporting its own floor across all of its
+        # evidence has measured noise, not harmony, and all three corpus tracks
+        # report exactly 1.0. Corroborated independently by the median
+        # root_margin sitting near 1.13, meaning the winning pitch class barely
+        # beat the runner up.
+        return fact(None, 'bars', 'guitar+bass', ['chord-run-length'],
+                    'UNKNOWN', 'indirect', band_hz=band,
+                    note='the measured root changed in every bar, which is the '
+                         'floor of this statistic rather than a harmonic rhythm')
     return fact(result, 'bars', 'guitar+bass', ['chord-run-length'],
                 'INFER', 'indirect', band_hz=band,
                 note='inherits the chord sequence\'s own uncertainty')
@@ -1567,10 +1652,6 @@ def _intro_fact(paths, loaded, mix, sr, local, built):
     density = [sum(1 for y in loaded.values()
                    if _rms_db(y[i * window:(i + 1) * window]) > ACTIVE_DB)
                for i in range(count)]
-    # The 75th percentile, not the median. With the median, an intro occupying
-    # half or more of the windows IS the median, the no-intro guard fires, and
-    # a 60 s track with a 35 s intro reports zero. The guard misfired exactly
-    # on the tracks with the longest intros.
     typical = float(np.percentile(np.asarray(density), INTRO_TYPICAL_PERCENTILE))
     if typical <= 0:
         return fact(None, 'seconds', 'mix', ['stem-density-step'], 'UNKNOWN',
@@ -1579,24 +1660,29 @@ def _intro_fact(paths, loaded, mix, sr, local, built):
                          'means nothing was measured rather than that the intro '
                          'is zero seconds long')
 
-    if density[0] >= typical:
+    if _holds(density, 0, typical):
         return fact(0.0, 'seconds', 'mix', ['stem-density-step'], 'INFER',
                     'direct',
                     note=f'the arrangement is already at its working density of '
-                         f'{typical:g} stems in the first window, so there is no '
-                         f'intro to measure')
+                         f'{typical:g} stems and holds it from the first window, '
+                         f'so there is no intro to measure')
 
-    # The first window that REACHES the working density, not the largest step
-    # on the way there. A step rule takes the earliest of equal steps, so a
-    # 30 s fade in through six equal steps reported 5 s, and a two second
-    # flourish before the real entry beat the real entry.
-    limit = max(1, int(min(INTRO_WINDOW_S, INTRO_WINDOW_FRACTION * count)))
-    reached = [i for i in range(min(count, limit)) if density[i] >= typical]
+    # The first window that reaches the working density AND HOLDS it. Not the
+    # largest step, which took the earliest of equal steps and so ended a 30 s
+    # fade in at 5 s. Not the first window merely to touch it, which a one
+    # second full band stab before the real entry defeats.
+    #
+    # There is no search window. An earlier version limited the search to the
+    # first 60 s or 40 percent of the track, which under a first-reach rule can
+    # only turn a correct answer into UNKNOWN, since the first qualifying index
+    # is by construction the earliest one. It cost four correct answers and
+    # bought nothing.
+    reached = [i for i in range(count) if _holds(density, i, typical)]
     if not reached:
         return fact(None, 'seconds', 'mix', ['stem-density-step'], 'UNKNOWN',
                     'direct',
-                    note=f'the arrangement never reaches its working density of '
-                         f'{typical:g} stems within the first {limit} s')
+                    note=f'the arrangement never reaches and holds its working '
+                         f'density of {typical:g} stems')
     raw = float(reached[0])
     size = int(density[reached[0]] - density[0])
     boundaries = (built.get('section_boundaries') or {}).get('value') or []
@@ -1623,8 +1709,8 @@ is what the two earlier versions did.
 
 | Shape | Truth | Result |
 |---|---|---|
-| Murder, She Wrote, real | 12.1 | 12.12 after snap |
-| Wrong Turn, real | unknown | 5, snapped to 4.18 |
+| Murder, She Wrote, real | 12.1 | 12, snapping to 12.12 |
+| Wrong Turn, real | unknown | 5 |
 | The Danger of Caring, real | no intro | 0.0 |
 | 6 s at density 2, then 5 s at 5 | 6 | 6.0 |
 | 35 s at 1, then 25 s at 5 | 35 | 35.0 |
@@ -1633,11 +1719,25 @@ is what the two earlier versions did.
 | fade 1 to 6 over 30 s, then 6 | 25 | 25.0 |
 | 2 s flourish at 3, then 4 forever | 6 | 6.0 |
 | 70 s at 1, then 80 s at 4 | 70 | 70.0 |
+| 1 s stab at 5 in the intro, real entry at 20 | 20 | 20.0 |
+| stab at 5 in window 0, then 20 s sparse | 21 | 21.0 |
+| 100 s sparse, then 30 s dense | 100 | 100.0 |
 
-The three shapes in the middle are the ones that killed the previous version.
-A median-based typical density reported 0.0 for the 35 s intro and for the
-silent opening, and a largest-step rule reported 5 s for the fade and 1 s for
-the flourish.
+Twelve of twelve, and the corpus answers are identical at percentile 90 and 95
+and at hold 2, 3, 4 and 5.
+
+**This table was re-measured against the rule as written here.** The previous
+revision's table was transcribed from a review of a slightly different rule,
+and four of its nine rows were wrong, because the reviewed rule had no search
+window and the shipped one did. A table is evidence about the rule that was
+run, not about the rule beside it.
+
+This is the fourth version of this axis. The first waited for the last stem to
+enter and reported 88 s against a known 12.1. The second used the median as the
+working density and reported 0.0 for a 35 s intro, because an intro occupying
+half the track IS the median. The third took the largest density step and ended
+a 30 s fade at 5 s, then the first window merely touching the working density,
+which a one second stab defeats. Every one of those passed the corpus.
 
 The grade is `INFER` in every branch. An earlier version granted `KNOW` when a
 section boundary sat within 4 s, and on The Danger of Caring a boundary sat
@@ -1667,7 +1767,10 @@ def _spectral_fact(paths, loaded, mix, sr, local, built):
     centroid = float(np.mean(librosa.feature.spectral_centroid(S=S, sr=sr)))
     value = {'low_end_share': round(low, 2), 'air_share': round(air, 2),
              'centroid_hz': round(centroid, 1)}
-    return fact(value, 'percent', 'mix', ['stft-band-share'], 'KNOW', 'indirect',
+    # INFER, not KNOW. The crossover, the FFT size and the choice of magnitude
+    # over power are all chosen, and eight readings of the same phrase span
+    # 10.8 to 58.0 percent on one track.
+    return fact(value, 'percent', 'mix', ['stft-band-share'], 'INFER', 'indirect',
                 band_hz=[0, int(sr // 2)],
                 note=f'low end is the per frame mean magnitude share below '
                      f'{LOW_END_HZ:g} Hz at n_fft {N_FFT}, sr {sr}, mono. The '
@@ -1687,8 +1790,10 @@ def _dynamic_arc_fact(paths, loaded, mix, sr, local, built):
     peak = max(usable)
     value = [[float(t), (None if v is None else round(float(v) - peak, 2))]
              for t, v in arc]
-    return fact(value, 'db', 'mix', ['rms-per-4s'], 'KNOW', 'indirect',
-                note='normalised to the track\'s own peak window')
+    # INFER, not KNOW. The 4 s window and the peak normalisation are choices.
+    return fact(value, 'db', 'mix', ['rms-per-4s'], 'INFER', 'indirect',
+                note='normalised to the track\'s own peak window, over a chosen '
+                     '4 second window')
 
 
 def _note_density_fact(paths, loaded, mix, sr, local, built):
@@ -1955,6 +2060,27 @@ In `scripts/compare.py`, add to `GATES`:
 ```python
     'tuning': {'kind': 'tuning', 'label': 'Tuning'},
 ```
+
+And add the cross check to `tests/test_facts.py`, inside `SheetTests`:
+
+```python
+    def test_the_projection_uses_compare_s_own_axis_names(self):
+        import compare
+        projected = f.scorable(self.sheet())
+        self.assertTrue(projected)
+        for axis in projected:
+            self.assertIn(axis, compare.GATES, f'{axis} is not a compare axis')
+```
+
+It lives here rather than in Task 5 because `facts.PROJECTION` already carries
+`tuning` while `compare.GATES` does not gain its gate until this task. Written
+in Task 5 it would be red for one commit; written here it is green the moment it
+exists, and `PROJECTION` stays a single literal in one file rather than being
+assembled across two tasks.
+
+A projection entry without its gate is a red test. A gate without its projection
+is an axis that silently never scores. This test is the only thing that catches
+either, which is why it belongs beside the gate rather than beside the sheet.
 
 Add beside `key_verdict`, keeping the module's no-import property intact:
 

@@ -393,6 +393,19 @@ class FileTests(unittest.TestCase):
         expected = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
         self.assertEqual(first_on, expected)
 
+    def test_a_zero_width_window_is_an_error_not_a_clamp(self):
+        bad = json.loads(json.dumps(FIXTURE))
+        bad['facts']['chords']['value'][1]['end_s'] = \
+            bad['facts']['chords']['value'][1]['start_s']
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(bad)
+
+    def test_windows_that_run_backwards_are_an_error(self):
+        bad = json.loads(json.dumps(FIXTURE))
+        bad['facts']['chords']['value'][2]['start_s'] = 0.0
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(bad)
+
     def test_the_clip_ends_where_the_last_measured_chord_ends(self):
         # The start was checked and the end was not, and the end is where a
         # uniform bar width accumulated 4.114 s of drift on a real track.
@@ -519,6 +532,12 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
     mid = mido.MidiFile(type=0, ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
     mid.tracks.append(track)
+    # The header tempo is nominal and the bar widths are measured, so on a
+    # track whose beat grid breathes the two disagree: on Wrong Turn 28 of 52
+    # bar windows deviate from the nominal bar. That is the right trade for an
+    # anchor clip, whose job is to land on the same timeline as the reference,
+    # but it means the header is a label rather than a description. A tempo map
+    # would describe it; nothing in the pipeline needs one yet.
     track.append(mido.MetaMessage('set_tempo',
                                   tempo=mido.bpm2tempo(float(bpm)), time=0))
     track.append(mido.MetaMessage('time_signature', numerator=BEATS_PER_BAR,
@@ -553,7 +572,27 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
         if align:
             start = int(round(float(entry.get('start_s') or 0.0) * ticks_per_second))
             end = int(round(float(entry.get('end_s') or 0.0) * ticks_per_second))
-            width = max(1, end - start)
+            width = end - start
+            # Validate here, not later. max(1, ...) looks like a safe clamp and
+            # is not: a zero width window leaves cursor one tick ahead of the
+            # next start, progression returns happily with a negative delta
+            # time in the message, and mido raises ValueError inside .save().
+            # That lands in the top level handler, which prints
+            # "ERROR: ValueError ... Details suppressed to protect secrets"
+            # for what is a data problem in a file the user supplied. No real
+            # sheet has such a window, 0 in 163 bars, which is exactly why the
+            # failure would be rare and baffling.
+            if width <= 0:
+                raise MidiEmitError(
+                    f'bar {index} spans {entry.get("start_s")} to '
+                    f'{entry.get("end_s")} seconds, which is not a duration. '
+                    f'The chord sequence in this fact sheet is not ordered or '
+                    f'not well formed; the emitter will not invent a width.')
+            if start < cursor:
+                raise MidiEmitError(
+                    f'bar {index} starts at {entry.get("start_s")} s, before '
+                    f'bar {index - 1} ended. Chord windows must not overlap or '
+                    f'run backwards.')
         else:
             start = index * bar_ticks
             width = bar_ticks
@@ -585,7 +624,7 @@ def low_confidence_bars(sheet, min_margin=MIN_MARGIN):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_midi -v`
-Expected: PASS, 21 tests
+Expected: PASS, 23 tests
 
 If `test_every_note_on_has_a_matching_note_off` fails, the delta time bookkeeping
 in the note_off loop is wrong, not the test. In a mido track every message's
@@ -652,7 +691,10 @@ def cmd_midi(args):
     import midi_emit
     sheet = json.loads(args.facts.read_text(encoding='utf-8'))
     out = args.out or args.facts.parent / 'progression.mid'
-    midi_emit.progression(sheet, octave=args.octave).save(str(out))
+    try:
+        midi_emit.progression(sheet, octave=args.octave).save(str(out))
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
     print(f'MIDI_WRITTEN={out}')
     sustained = midi_emit.low_confidence_bars(sheet)
     if sustained:
