@@ -398,8 +398,8 @@ def tempo_levels(tempo, family):
         return []
     levels = [{'bpm': primary, 'source': 'primary', 'relative_strength': None}]
     seen = {primary}
-    members = family.get('value') if isinstance(family, dict) else None
-    for member in members if isinstance(members, list) else []:
+    members = _family_members(family)
+    for member in members:
         if not isinstance(member, dict):
             continue
         bpm = _number(member.get('bpm'))
@@ -414,10 +414,22 @@ def tempo_levels(tempo, family):
     return levels
 
 
+def _family_members(family):
+    """The family axis's members, or nothing when it cannot supply any.
+
+    An axis graded UNKNOWN supplies nothing even when it carries a list, for
+    the same reason `_usable` drops one anywhere else: a sheet that declined to
+    resolve the family is not a set anyone may select from.
+    """
+    if not isinstance(family, dict) or family.get('confidence') == 'UNKNOWN':
+        return []
+    members = family.get('value')
+    return members if isinstance(members, list) else []
+
+
 def _unreadable_members(family):
     """How many family members carry no usable bpm."""
-    members = family.get('value') if isinstance(family, dict) else None
-    return sum(1 for member in (members if isinstance(members, list) else [])
+    return sum(1 for member in _family_members(family)
                if not isinstance(member, dict)
                or _number(member.get('bpm')) is None)
 
@@ -459,11 +471,19 @@ def select_tempo_level(tempo, family, wanted):
     # simply has no competing level is neither, and claiming otherwise
     # whenever the set is small would be a confident explanation of something
     # that never happened.
+    # Three situations look alike from here and none may be guessed at: an axis
+    # that is absent, an axis that is present but declined to resolve, and an
+    # axis whose members carry no readable bpm. Reporting the first for any of
+    # them sends someone to rerun facts over a sheet that is not stale.
     dropped = _unreadable_members(family)
     if family is None:
         thin = ('; this sheet has no tempo_family axis, so it predates the '
                 'axis that carries the family. Rerun facts to select a level '
                 'other than the primary')
+    elif isinstance(family, dict) and family.get('confidence') == 'UNKNOWN':
+        thin = ('; this sheet\'s tempo_family axis is graded UNKNOWN, so the '
+                'measurement did not resolve a family and only the primary is '
+                'selectable')
     elif dropped:
         thin = (f'; {dropped} family member(s) carry no readable bpm and are '
                 f'not selectable')
@@ -529,7 +549,9 @@ def slots(sheet, hold_out=None, tempo_level=None):
     # measurement reported. select_tempo_level raises rather than falling back,
     # because a BPM that resolved to nothing must never reach a slot: a slot is
     # exactly what numbers_trace will later certify as traced to the sheet.
-    family = _usable(sheet, 'tempo_family')
+    # The RAW axis, not _usable: an absent axis and one graded UNKNOWN
+    # need different messages, and _usable returns None for both.
+    family = _facts(sheet).get('tempo_family')
     chosen = select_tempo_level(tempo, family, tempo_level) if (
         tempo and tempo_level is not None) else None
     beats = _number(tempo.get('value')) if tempo else None

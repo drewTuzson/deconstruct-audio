@@ -519,6 +519,27 @@ class TempoLevelTests(unittest.TestCase):
         self.assertIn('no tempo_family axis', str(caught.exception))
         self.assertIn('Rerun facts', str(caught.exception))
 
+    def test_an_axis_graded_unknown_is_not_reported_as_a_missing_axis(self):
+        # Three situations look alike from the refusal and none may be guessed
+        # at. An axis present but graded UNKNOWN was being reported as absent,
+        # which sends someone to rerun facts over a sheet that is not stale.
+        unknown = _family_axis(confidence='UNKNOWN')
+        self.assertEqual([l['bpm'] for l in b.tempo_levels(INFER_TEMPO,
+                                                           unknown)], [80.7])
+        with self.assertRaises(b.BrainError) as caught:
+            b.select_tempo_level(INFER_TEMPO, unknown, 161.5)
+        message = str(caught.exception)
+        self.assertIn('graded UNKNOWN', message)
+        self.assertNotIn('no tempo_family axis', message)
+        self.assertNotIn('Rerun facts', message)
+
+    def test_an_unknown_axis_reaches_that_message_through_slots(self):
+        sheet = _family_sheet()
+        sheet['facts']['tempo_family']['confidence'] = 'UNKNOWN'
+        with self.assertRaises(b.BrainError) as caught:
+            b.slots(sheet, tempo_level=161.5)
+        self.assertIn('graded UNKNOWN', str(caught.exception))
+
     def test_a_tempo_with_no_competing_level_offers_only_its_primary(self):
         plain = {'value': 80.7, 'unit': 'bpm', 'confidence': 'KNOW',
                  'suno_actionable': 'direct', 'note': None}
