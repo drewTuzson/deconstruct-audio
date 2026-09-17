@@ -64,7 +64,7 @@ A claim on an axis nothing measured is kept as context. It is usable for what no
 
 `prompt <facts.json>` fills the Brain's slots from the fact sheet alone and prints `SLOTS_WRITTEN=<path>`, `RULES_FROM=<file>` and `HELD_OUT=<axis>`. It reads `facts.json` and nothing else: not `listening.md`, not `impressions.md`, not `report.md`. That is the point, because a prompt built from prose is what this pipeline replaced.
 
-Compose the style yourself from `slots.json` plus your own genre judgment. The script fills and checks; it does not have taste. Never quote a number the fact sheet did not measure: every number in the style has to trace to a slot phrase, and one that does not is a `FAIL`.
+Compose the style yourself from `slots.json` plus your own genre judgment. The script fills and checks; it does not have taste. Never quote a number the fact sheet did not measure: every number in the style and in the exclude field has to trace to a slot phrase, with the unit it was measured in, and one that does not is a `FAIL`. A model number such as `909` or a year such as `1987` fails wherever you put it, because nothing measured either.
 
 Declare what you added. Every tag and every sentence in the style must either be a slot phrase, which means it came from a measurement, or be named with `--added` as your own judgment. A genre, a subgenre and an era are judgment. A register, a tuning and a BPM are measurements. Every slot phrase must also appear in the style or be named with `--dropped`, and a drop has to be forced by the character budget. Listing a measurement as dropped when it would have fitted is refused.
 

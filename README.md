@@ -179,9 +179,11 @@ prompt facts.json --style style.txt \
 ```
 
 Composition stays with the agent. The command fills the slots and then checks
-what was written, including whether every number in the prompt traces back to a
-measured fact. A number that does not is the failure mode this tool was built
-against, and it is a `FAIL`, not a warning.
+what was written, including whether every number traces back to a measured fact,
+with the unit it was measured in. Both fields are read, because the exclude field
+reaches the generator the same way the style does: a model number such as `909`
+traces to nothing and fails wherever you put it. A number that does not trace is
+the failure mode this tool was built against, and it is a `FAIL`, not a warning.
 
 Provenance closes in both directions. Every tag and sentence in the style either
 matches a slot phrase, meaning it came from a measurement, or is declared as the
