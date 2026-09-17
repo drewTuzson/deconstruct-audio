@@ -36,18 +36,29 @@ MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
 # bars where the winning root beat the runner up by less than five percent.
 # That is the condition a sustained root is FOR.
 #
-# The plan asks for that distribution to be re-measured here against the real
-# corpus sheets. It could not be: at the time this landed no sheet existed to
-# measure, because the command that writes them had not been built. The three
-# track figures above are not mine. They are the critic's, recorded in
-# CRITIC-plan-review-r3.md, and at 1.05 that same review counted 8 of 45, 12 of
-# 65 and 12 of 53 bars flagged, which is 32 of 163. Treat them as inherited
-# rather than confirmed until the corpus sheets land, and re-run the sweep then.
+# Re-measured against the three real corpus sheets rather than inherited. The
+# figures above reproduce exactly, and the full sweep is:
 #
-# What survives without the sheets is the reason for the number, which does not
-# depend on any distribution: a margin of exactly 1.0 is a tie between two pitch
-# classes, so 1.05 flags the bars where the winning root beat the runner up by
-# less than five percent. That is the condition a sustained root is FOR.
+#   cut    murder     danger     wrongturn    corpus
+#   1.02    3/45        5/65       8/53        16/163   9.8%
+#   1.05    8/45       12/65      12/53        32/163  19.6%
+#   1.10   15/45       30/65      19/53        64/163  39.3%
+#   1.25   36/45       52/65      34/53       122/163  74.8%
+#
+# So 1.25 really would turn three quarters of the corpus into sustained roots,
+# and no bar in the corpus is an exact tie: the minimum margin is 1.001.
+#
+# The distribution is smooth and offers no natural cliff to cut at, so the
+# number is set from what it means rather than from where a histogram bends. A
+# margin of exactly 1.0 is a tie between two pitch classes, so 1.05 flags the
+# bars where the winning root beat the runner up by less than five percent.
+# That is the condition a sustained root is FOR. It fires on about one bar in
+# five, which is a safeguard that does real work without taking over the clip.
+#
+# Reading the rate as a fault in this constant would be a mistake. All three
+# tracks report harmonic_rhythm UNKNOWN because the measured root changes in
+# every bar, so a fifth of bars being hard to call is a property of the chord
+# axis on this material, not a threshold to loosen.
 MIN_MARGIN = 1.05
 
 
