@@ -783,6 +783,10 @@ def cmd_prompt(args):
         raise SkillError(
             'No Brain is connected. Run connect-brain, or compose without one '
             'and skip this command; it will not invent a format.')
+    # Resolved BEFORE slots.json is written, which is the order that stops an
+    # axis being held out after someone has seen which one turned out
+    # inconvenient.
+    hold_out = None if args.hold_out == 'none' else args.hold_out
     try:
         sources = brain_mod.brain_sources(path)
         # Whichever instruction source actually carries the labelled rules.
@@ -791,14 +795,13 @@ def cmd_prompt(args):
         # them, so every rule came back unreadable against a Brain that parses
         # cleanly. See brain.rules_from.
         source_name, rules = brain_mod.rules_from(sources)
+        # Inside the wrap too: slots refuses an unrecognised hold out axis, and
+        # an unwrapped BrainError reaches the user as 'Details suppressed to
+        # protect secrets' instead of the sentence naming the valid axes.
+        filled = brain_mod.slots(sheet, hold_out=hold_out)
     except brain_mod.BrainError as exc:
         # Wrapped, or the top-level handler suppresses the authored message.
         raise SkillError(str(exc)) from None
-    # Resolved BEFORE slots.json is written, which is the order that stops an
-    # axis being held out after someone has seen which one turned out
-    # inconvenient.
-    hold_out = None if args.hold_out == 'none' else args.hold_out
-    filled = brain_mod.slots(sheet, hold_out=hold_out)
 
     out = args.out or args.facts.parent
     out.mkdir(parents=True, exist_ok=True)

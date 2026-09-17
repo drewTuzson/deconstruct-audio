@@ -260,6 +260,50 @@ def _facts(sheet):
     return facts if isinstance(facts, dict) else {}
 
 
+def _number(value):
+    """A finite number, or None.
+
+    facts.py owns the shape of every value and this module reads it, so the two
+    can drift: the sections axis split into section_count and
+    section_boundaries once already. A stale or hand edited sheet carrying a
+    string tempo or a scalar register used to reach float() and raise a bare
+    ValueError or TypeError, which the top level handler prints as 'Details
+    suppressed to protect secrets' rather than naming the axis at fault.
+
+    A field this module cannot use makes its axis UNUSABLE, which the command
+    already knows how to say out loud, and which is the honest answer: the
+    sheet did not supply a number, so no phrase is written from one.
+
+    A bool is not a number here. `True` is an int in Python and would otherwise
+    become a tempo of 1 BPM.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    # NaN and infinity are not measurements. write_json refuses them on the way
+    # out; this refuses them on the way in.
+    return number if number == number and abs(number) != float('inf') else None
+
+
+def _numbers(value):
+    """A list of finite numbers, or None if any element is not one."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    out = [_number(item) for item in value]
+    return None if any(item is None for item in out) else out
+
+
+def _field(entry, key):
+    """One numeric field out of a Fact's value mapping, or None."""
+    value = entry.get('value')
+    return _number(value.get(key)) if isinstance(value, dict) else None
+
+
+def _text(value):
+    """A non empty string, or None. A number is not a name."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _usable(sheet, axis):
     entry = _facts(sheet).get(axis)
     if not isinstance(entry, dict):
@@ -302,6 +346,15 @@ def slots(sheet, hold_out=None):
     generation cycles lost to an intro arriving an octave high, which makes it
     the axis most likely to drift when nothing anchors it.
     """
+    # An axis name nobody recognises is refused rather than ignored. Ignoring
+    # it held nothing out while `held_out` still reported the name, so
+    # HELD_OUT= printed a control that was never applied and the exit bar would
+    # have scored a run it did not actually control. The CLI's own `choices`
+    # stops this at the command line; this stops it for every other caller.
+    if hold_out is not None and hold_out not in HOLD_OUT_CHOICES:
+        raise BrainError(
+            f'{hold_out!r} is not an axis that can be held out. Choose one of '
+            f'{", ".join(HOLD_OUT_CHOICES)}, or pass none for no control.')
     out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
            'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': [],
            'held_out': hold_out}
@@ -312,8 +365,9 @@ def slots(sheet, hold_out=None):
             out['unusable'].append(axis)
 
     tempo = None if hold_out == 'tempo' else _usable(sheet, 'tempo')
-    if tempo:
-        out['moods'].append(f'{round(float(tempo["value"]))} BPM')
+    beats = _number(tempo.get('value')) if tempo else None
+    if beats is not None:
+        out['moods'].append(f'{round(beats)} BPM')
         # See THE TEMPO RULE in the plan. _usable already drops an UNKNOWN
         # tempo, so nothing reaches here without a value, but an INFER tempo
         # whose family holds a competing metrical level is a minority reading
@@ -321,39 +375,63 @@ def slots(sheet, hold_out=None):
         if tempo['confidence'] != 'KNOW':
             out['ask_first'].append(
                 f'tempo is graded {tempo["confidence"]}: {tempo.get("note")}')
+    elif tempo:
+        out['unusable'].append('tempo')
 
     tuning = None if hold_out == 'tuning' else _usable(sheet, 'tuning')
-    if tuning:
+    name = _text(tuning.get('value')) if tuning else None
+    if name:
         out['instruments'].append(
-            f'{str(tuning["value"]).replace("#", " sharp")} tuned rhythm guitar'
+            f'{name.replace("#", " sharp")} tuned rhythm guitar'
             .replace('-', ' '))
+    elif tuning:
+        out['unusable'].append('tuning')
 
     lead = (None if hold_out == 'lead_register'
             else _usable(sheet, 'lead_register'))
-    if lead:
-        label = _band(float(lead['value']['median_midi']), REGISTER_BANDS,
-                      'very high register')
-        out['instruments'].append(f'{label} lead guitar figure')
+    median = _field(lead, 'median_midi') if lead else None
+    if median is not None:
+        out['instruments'].append(
+            f'{_band(median, REGISTER_BANDS, "very high register")} '
+            f'lead guitar figure')
+    elif lead:
+        out['unusable'].append('lead_register')
 
     vocal = _usable(sheet, 'vocal_register')
-    if vocal:
-        label = _band(float(vocal['value']['median_midi']), REGISTER_BANDS,
-                      'very high register')
-        out['vocals'].append(f'{label} lead vocal')
+    sung = _field(vocal, 'median_midi') if vocal else None
+    if sung is not None:
+        out['vocals'].append(
+            f'{_band(sung, REGISTER_BANDS, "very high register")} lead vocal')
+    elif vocal:
+        out['unusable'].append('vocal_register')
 
     spectral = (None if hold_out == 'spectral_balance'
                 else _usable(sheet, 'spectral_balance'))
-    if spectral:
+    low_end = _field(spectral, 'low_end_share') if spectral else None
+    if low_end is not None:
         out['production'].append(
-            _band(float(spectral['value']['low_end_share']), LOW_END_BANDS,
-                  'dominant low end'))
+            _band(low_end, LOW_END_BANDS, 'dominant low end'))
+    elif spectral:
+        out['unusable'].append('spectral_balance')
 
     harmonic = _usable(sheet, 'harmonic_rhythm')
-    if harmonic:
-        out['production'].append(f'{harmonic["value"]["label"]} harmony')
+    label = _text((harmonic.get('value') or {}).get('label')) if (
+        harmonic and isinstance(harmonic.get('value'), dict)) else None
+    if label:
+        out['production'].append(f'{label} harmony')
+    elif harmonic:
+        out['unusable'].append('harmonic_rhythm')
 
     intro = (None if hold_out == 'intro_seconds'
              else _usable(sheet, 'intro_seconds'))
+    opening = _number(intro.get('value')) if intro else None
+    if opening is not None:
+        out['direction'].append(
+            f'The song opens on roughly {round(opening)} seconds '
+            f'of build before the full arrangement lands.')
+    elif intro:
+        out['unusable'].append('intro_seconds')
+
     # section_count, not sections. The fact sheet split that axis: boundaries
     # are INFER and the count is UNKNOWN by construction, because sixteen
     # segmentation methods failed to generalise. Reading the old name returns
@@ -361,32 +439,31 @@ def slots(sheet, hold_out=None):
     # the Brain requires two to three. The agent was then quietly expected to
     # invent one, which is the exact failure this whole pipeline exists to stop.
     sections = _usable(sheet, 'section_count')
+    count = _number(sections.get('value')) if sections else None
     boundaries = _usable(sheet, 'section_boundaries')
-    if intro:
-        out['direction'].append(
-            f'The song opens on roughly {round(float(intro["value"]))} seconds '
-            f'of build before the full arrangement lands.')
+    marks = _numbers(boundaries.get('value')) if boundaries else None
     # Neither sentence claims the track ends without a fade. The plan's wording
     # did, and it was wrong twice over: nothing in the sheet measures a fade,
     # and 'without' is a negation word the Brain bans outright, so the phrase
     # could not legally reach a prompt. A slot phrase the validator must reject
     # is worse than a missing one, because the agent's only escape is a drop it
     # cannot justify against the budget.
-    if sections:
+    if count is not None:
         out['direction'].append(
-            f'It moves through about {int(sections["value"])} distinct '
-            f'sections of its own.')
-    elif boundaries and len(boundaries['value']) >= 2:
+            f'It moves through about {int(count)} distinct sections of its own.')
+    elif marks and len(marks) >= 2:
         # The count is UNKNOWN, but the boundaries are real and the Brain needs
         # a second direction sentence. This says what was measured, the shape,
         # without stating a count nothing earned.
-        spans = [later - earlier
-                 for earlier, later in zip(boundaries['value'],
-                                           boundaries['value'][1:])]
-        longest = max(spans) if spans else 0
+        longest = max(later - earlier
+                      for earlier, later in zip(marks, marks[1:]))
         out['direction'].append(
             f'It changes texture several times, with its longest unbroken '
             f'stretch running about {round(longest)} seconds.')
+    if sections and count is None:
+        out['unusable'].append('section_count')
+    if boundaries and not (marks and len(marks) >= 2):
+        out['unusable'].append('section_boundaries')
     if len(out['direction']) < 2:
         out['unusable'].append('direction_prose_second_sentence')
 
@@ -394,8 +471,11 @@ def slots(sheet, hold_out=None):
     if chords:
         out['midi_only'].append('chord progression, supplied as MIDI')
     key = _usable(sheet, 'key')
-    if key:
-        out['midi_only'].append(f'key, {key["value"]}, supplied as MIDI')
+    named = _text(key.get('value')) if key else None
+    if named:
+        out['midi_only'].append(f'key, {named}, supplied as MIDI')
+    elif key:
+        out['unusable'].append('key')
     return out
 
 
@@ -563,11 +643,33 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
         'PASS' if len(sentences) >= PROSE_MIN_SENTENCES else 'FAIL',
         f'{len(sentences)} prose sentences of five words or more'))
 
-    # BPM placement
+    # BPM placement, but only when there is a BPM to place.
+    #
+    # slots() emits no BPM when the tempo axis is held out, absent, or graded
+    # UNKNOWN, and the plan's own tempo rule wants exactly that: a tag stack
+    # without a BPM is a smaller failure than one anchored to the wrong
+    # metrical level. Demanding one unconditionally made those runs impossible
+    # to pass, because numbers_trace rejects a BPM that is not in the slots and
+    # this rejected a style that left it out. `--hold-out tempo`, the control
+    # the exit bar leans on, could never have reached PASS.
+    #
+    # It does not become a check that passes for want of a rule. When the sheet
+    # measured no tempo, a style that states one anyway FAILS here: that is a
+    # tempo nobody measured, which is the failure this pipeline exists to stop,
+    # and numbers_trace alone would miss a bare 'BPM' carrying no digits.
+    measured_bpm = any('bpm' in str(phrase).lower()
+                       for key in SLOT_KEYS for phrase in filled.get(key, []))
     bpm_at = body.find('bpm')
-    if bpm_at < 0:
-        results.append(_result('bpm_placement', 'FAIL',
-                               'no BPM anywhere in the style'))
+    if not measured_bpm:
+        results.append(_result(
+            'bpm_placement', 'FAIL' if bpm_at >= 0 else 'PASS',
+            'the style states a BPM the fact sheet did not measure'
+            if bpm_at >= 0
+            else 'no tempo reached the slots, so the style states none'))
+    elif bpm_at < 0:
+        results.append(_result(
+            'bpm_placement', 'FAIL',
+            'a tempo was measured and never reached the style'))
     else:
         first_sentence = SENTENCE.split(style)[0]
         limit = len(first_sentence) * MOODS_FRACTION

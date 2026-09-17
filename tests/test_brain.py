@@ -328,6 +328,56 @@ class SlotTests(unittest.TestCase):
         for broken in ({}, {'facts': None}, {'facts': []}, {'facts': 'text'}):
             self.assertEqual(b.slots(broken)['moods'], [], broken)
 
+    def test_a_malformed_value_names_its_axis_rather_than_raising(self):
+        # facts.py owns the shape of each value and this module reads it, so
+        # the two can drift; the sections axis split once already. A string
+        # tempo or a scalar register used to reach float() and raise, which the
+        # top level handler prints as 'Details suppressed to protect secrets'.
+        cases = {
+            'tempo': {'value': 'eighty one', 'confidence': 'KNOW'},
+            'tuning': {'value': 42, 'confidence': 'INFER'},
+            'lead_register': {'value': {}, 'confidence': 'INFER'},
+            'vocal_register': {'value': 55.0, 'confidence': 'INFER'},
+            'spectral_balance': {'value': {'centroid_hz': 1800.0},
+                                 'confidence': 'KNOW'},
+            'harmonic_rhythm': {'value': {'median_chord_bars': 4.0},
+                                'confidence': 'INFER'},
+            'intro_seconds': {'value': 'twelve', 'confidence': 'INFER'},
+            'section_count': {'value': [7], 'confidence': 'INFER'},
+            'section_boundaries': {'value': [0.0, 'later'],
+                                   'confidence': 'INFER'},
+            'key': {'value': 7, 'confidence': 'KNOW'},
+        }
+        for axis, entry in cases.items():
+            filled = b.slots({'facts': {axis: entry}})
+            self.assertIn(axis, filled['unusable'], axis)
+            self.assertEqual(_every_phrase(filled), [], axis)
+
+    def test_a_non_finite_measurement_is_unusable(self):
+        # write_json refuses a NaN on the way out. This refuses one on the way
+        # in, rather than writing 'nan BPM' into a prompt.
+        for broken in (float('nan'), float('inf')):
+            filled = b.slots({'facts': {'tempo': {'value': broken,
+                                                  'confidence': 'KNOW'}}})
+            self.assertEqual(filled['moods'], [])
+            self.assertIn('tempo', filled['unusable'])
+
+    def test_a_boolean_is_not_a_measurement(self):
+        # True is an int in Python and would otherwise become 1 BPM.
+        filled = b.slots({'facts': {'tempo': {'value': True,
+                                              'confidence': 'KNOW'}}})
+        self.assertEqual(filled['moods'], [])
+        self.assertIn('tempo', filled['unusable'])
+
+    def test_an_axis_nobody_recognises_cannot_be_held_out(self):
+        # Ignoring it held nothing out while held_out still reported the name,
+        # so HELD_OUT= printed a control that was never applied.
+        with self.assertRaises(b.BrainError):
+            b.slots(FULL_SHEET, hold_out='lead_regsiter')
+        for axis in b.HOLD_OUT_CHOICES:
+            self.assertEqual(b.slots(FULL_SHEET, hold_out=axis)['held_out'],
+                             axis)
+
     def test_an_unknown_tempo_produces_no_bpm_at_all(self):
         filled = b.slots(_sheet_with(tempo={
             'value': None, 'unit': 'bpm', 'confidence': 'UNKNOWN',
@@ -472,6 +522,42 @@ class ValidatorTests(unittest.TestCase):
         tail = GOOD_STYLE.replace(', 81 BPM', '') + ' 81 BPM'
         results = self.run_it(style=tail)
         self.assertEqual(check(results, 'bpm_placement')['verdict'], 'FAIL')
+
+    def test_a_held_out_tempo_can_still_reach_a_clean_verdict(self):
+        # The contradiction between the tempo rule and this check. slots emits
+        # no BPM when tempo is held out, absent or UNKNOWN; numbers_trace then
+        # rejects a BPM that is not in the slots, and bpm_placement used to
+        # reject a style that left it out. --hold-out tempo, the control the
+        # exit bar leans on, could never have passed.
+        filled = b.slots(FULL_SHEET, hold_out='tempo')
+        kept = tuple(t for t in GOOD_TAGS if t != '81 BPM')
+        style = (', '.join(kept) + '. ' + MEASURED_SENTENCE + ' '
+                 + ' '.join(JUDGEMENT_SENTENCES))
+        results = b.validate(
+            style, GOOD_EXCLUDE, SHEET, rules(), filled=filled,
+            declared=tuple(t for t in kept if t not in MEASURED_TAGS)
+            + JUDGEMENT_SENTENCES)
+        self.assertEqual(check(results, 'bpm_placement')['verdict'], 'PASS')
+        self.assertEqual([r for r in results if r['verdict'] != 'PASS'], [])
+
+    def test_a_bpm_the_sheet_never_measured_fails(self):
+        # The other half, so the relaxation above is not a way through. With no
+        # tempo in the slots, a style that states one is quoting a number
+        # nobody measured.
+        filled = b.slots(FULL_SHEET, hold_out='tempo')
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled, declared=GOOD_DECLARED)
+        entry = check(results, 'bpm_placement')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('did not measure', entry['detail'])
+
+    def test_a_measured_tempo_left_out_of_the_style_fails(self):
+        without = (', '.join(t for t in GOOD_TAGS if t != '81 BPM') + '. '
+                   + MEASURED_SENTENCE + ' ' + ' '.join(JUDGEMENT_SENTENCES))
+        results = self.run_it(style=without)
+        entry = check(results, 'bpm_placement')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('never reached the style', entry['detail'])
 
     def test_a_number_that_traces_to_no_fact_fails(self):
         results = self.run_it(style=GOOD_STYLE + ' 140 BPM')
