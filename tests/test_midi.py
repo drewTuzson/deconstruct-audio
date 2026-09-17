@@ -61,5 +61,137 @@ class PitchTests(unittest.TestCase):
                 self.assertLessEqual(p, 127)
 
 
+import tempfile
+
+import mido
+
+
+class FileTests(unittest.TestCase):
+    def setUp(self):
+        self.mid = m.progression(FIXTURE)
+
+    def test_the_header_carries_the_measured_tempo(self):
+        tempos = [msg.tempo for track in self.mid.tracks for msg in track
+                  if msg.type == 'set_tempo']
+        self.assertEqual(len(tempos), 1)
+        self.assertAlmostEqual(mido.tempo2bpm(tempos[0]), 80.0, places=1)
+
+    def test_it_writes_one_chord_per_bar_for_every_measured_chord(self):
+        starts = set()
+        absolute = 0
+        for msg in self.mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                starts.add(absolute)
+        self.assertEqual(len(starts), 4)
+
+    def test_the_clip_starts_where_the_first_measured_chord_starts(self):
+        first_on = None
+        absolute = 0
+        for msg in self.mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                first_on = absolute
+                break
+        expected = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
+        self.assertEqual(first_on, expected)
+
+    def test_a_zero_width_window_is_an_error_not_a_clamp(self):
+        bad = json.loads(json.dumps(FIXTURE))
+        bad['facts']['chords']['value'][1]['end_s'] = \
+            bad['facts']['chords']['value'][1]['start_s']
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(bad)
+
+    def test_windows_that_run_backwards_are_an_error(self):
+        bad = json.loads(json.dumps(FIXTURE))
+        bad['facts']['chords']['value'][2]['start_s'] = 0.0
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(bad)
+
+    def test_the_clip_ends_where_the_last_measured_chord_ends(self):
+        # The start was checked and the end was not, and the end is where a
+        # uniform bar width accumulated 4.114 s of drift on a real track.
+        last_end = float(FIXTURE['facts']['chords']['value'][-1]['end_s'])
+        self.assertAlmostEqual(self.mid.length, last_end, delta=0.05)
+
+    def test_alignment_can_be_turned_off(self):
+        loose = m.progression(FIXTURE, align=False)
+        first_on = None
+        absolute = 0
+        for msg in loose.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                first_on = absolute
+                break
+        self.assertEqual(first_on, 0)
+
+    def test_the_fourth_bar_is_a_sustained_root_because_its_margin_is_low(self):
+        bar = self._notes_in_bar(3)
+        self.assertEqual(len(bar), 1, f'expected a sustained root, got {bar}')
+
+    def test_the_second_bar_is_a_full_major_triad(self):
+        self.assertEqual(len(self._notes_in_bar(1)), 3)
+
+    def test_the_first_bar_is_a_power_chord_with_no_third(self):
+        notes = sorted(self._notes_in_bar(0))
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(notes[1] - notes[0], 7)
+
+    def test_every_note_on_has_a_matching_note_off(self):
+        open_notes = {}
+        for msg in self.mid.tracks[0]:
+            if msg.type == 'note_on' and msg.velocity > 0:
+                open_notes[msg.note] = open_notes.get(msg.note, 0) + 1
+            elif msg.type == 'note_off' or (msg.type == 'note_on'
+                                            and msg.velocity == 0):
+                open_notes[msg.note] = open_notes.get(msg.note, 0) - 1
+        self.assertTrue(all(v == 0 for v in open_notes.values()), open_notes)
+
+    def test_it_survives_a_round_trip_through_a_real_midi_parser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'progression.mid'
+            self.mid.save(str(path))
+            reread = mido.MidiFile(str(path))
+            self.assertEqual(reread.ticks_per_beat, self.mid.ticks_per_beat)
+            self.assertEqual(sum(1 for t in reread.tracks for msg in t
+                                 if msg.type == 'note_on' and msg.velocity > 0),
+                             sum(1 for t in self.mid.tracks for msg in t
+                                 if msg.type == 'note_on' and msg.velocity > 0))
+
+    def test_no_chords_yields_an_error_rather_than_an_empty_file(self):
+        empty = json.loads(json.dumps(FIXTURE))
+        empty['facts']['chords']['value'] = []
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(empty)
+
+    def test_an_unknown_chords_grade_yields_an_error_not_a_silent_clip(self):
+        unknown = json.loads(json.dumps(FIXTURE))
+        unknown['facts']['chords']['confidence'] = 'UNKNOWN'
+        unknown['facts']['chords']['value'] = None
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(unknown)
+
+    def test_a_missing_tempo_yields_an_error_rather_than_a_default_120(self):
+        no_tempo = json.loads(json.dumps(FIXTURE))
+        no_tempo['facts'].pop('tempo')
+        with self.assertRaises(m.MidiEmitError):
+            m.progression(no_tempo)
+
+    def _notes_in_bar(self, index):
+        """Note numbers whose note_on lands inside bar `index`, counted from
+        the first sounding bar rather than from tick zero, because the clip is
+        offset to the first measured chord's start time."""
+        bar_ticks = 4 * self.mid.ticks_per_beat
+        lead = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
+        low, high = lead + index * bar_ticks, lead + (index + 1) * bar_ticks
+        out, absolute = [], 0
+        for msg in self.mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0 and low <= absolute < high:
+                out.append(msg.note)
+        return out
+
+
 if __name__ == '__main__':
     unittest.main()
