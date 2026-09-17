@@ -299,6 +299,12 @@ def _field(entry, key):
     return _number(value.get(key)) if isinstance(value, dict) else None
 
 
+def _text_field(entry, key):
+    """One string field out of a Fact's value mapping, or None."""
+    value = entry.get('value')
+    return _text(value.get(key)) if isinstance(value, dict) else None
+
+
 def _text(value):
     """A non empty string, or None. A number is not a name."""
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -415,8 +421,7 @@ def slots(sheet, hold_out=None):
         out['unusable'].append('spectral_balance')
 
     harmonic = _usable(sheet, 'harmonic_rhythm')
-    label = _text((harmonic.get('value') or {}).get('label')) if (
-        harmonic and isinstance(harmonic.get('value'), dict)) else None
+    label = _text_field(harmonic, 'label') if harmonic else None
     if label:
         out['production'].append(f'{label} harmony')
     elif harmonic:
