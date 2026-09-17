@@ -667,7 +667,7 @@ FULL_SHEET = {'facts': {
               'suno_actionable': 'direct'},
     'key': {'value': 'F# minor', 'unit': 'name', 'confidence': 'KNOW',
             'suno_actionable': 'direct'},
-    'tuning': {'value': 'drop C#', 'unit': 'name', 'confidence': 'KNOW',
+    'tuning': {'value': 'drop C#', 'unit': 'name', 'confidence': 'INFER',
                'suno_actionable': 'direct'},
     'lead_register': {'value': {'median_midi': 42.0, 'p10_midi': 38.0,
                                 'p90_midi': 55.0},
@@ -848,6 +848,20 @@ def slots(sheet):
         out['midi_only'].append(f'key, {key["value"]}, supplied as MIDI')
     return out
 ```
+
+**One warning that belongs here rather than in the fact sheet.** The tuning
+axis reports the lowest sustained semitone in the bass, and a sub octave pitch
+tracking error can land inside the tuning table, be named with a margin of a
+fraction of a cent, and look certain. The fact sheet does not prevent that. It
+discloses it, by carrying every supported candidate and the best supported one
+in the fact's note.
+
+That disclosure reaches a human reading `facts.md` and nothing else. So `slots`
+may turn `tuning` into an instrument tag, and the agent composing the prompt
+must read the tuning note before it does. If this wiring is ever made
+autonomous, with no human between the fact sheet and the generated prompt, the
+tuning axis needs prevention rather than visibility and this plan needs
+revisiting.
 
 Note what `slots` does not do. It never emits a chord name or a key name into a
 text slot, because those are `midi_only` and community evidence is consistent
