@@ -619,18 +619,51 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(entry['verdict'], 'FAIL')
         self.assertIn('left out without being dropped', entry['detail'])
 
-    def test_a_measurement_named_in_dropped_is_accounted_for(self):
-        # Dropping is legitimate: the Custom budget is 1000 characters and the
-        # slots will not always fit. Naming it is what makes it accountable.
+    def test_dropping_every_slot_does_not_discharge_the_obligation(self):
+        # The attack that defeated the first symmetric version: paste the whole
+        # slot list into --dropped and an 859 character prompt about a grain
+        # silo, carrying one number from the sheet, passed all thirteen checks.
+        # A drop must be FORCED, and the slots fit with room to spare.
         filled = b.slots(FULL_SHEET)
         every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
         kept = [p for p in every if 'BPM' in p]
         results = self.run_it(
-            style='. '.join(kept) + '. It opens quietly.',
+            style=', '.join(kept) + '. It opens quietly. It ends loudly.',
             filled=filled,
-            declared=('It opens quietly',),
+            declared=('It opens quietly', 'It ends loudly'),
+            dropped=tuple(p for p in every if p not in kept))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('not forced', entry['detail'])
+
+    def test_a_drop_forced_by_a_real_overflow_is_allowed(self):
+        # The case the flag exists for. Measurements have priority over
+        # judgement for the budget, so a drop is justified exactly as far as
+        # the slot phrases overflow the cap on their own.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        kept = [p for p in every if 'BPM' in p]
+        tiny = b.extract_rules(FIXTURE_INSTRUCTIONS.replace(
+            'HARD limit 1,000 characters, target 850 to 950',
+            'HARD limit 60 characters, target 30 to 55'))
+        results = b.validate(
+            ', '.join(kept) + '. It opens quietly. It ends loudly.',
+            GOOD_EXCLUDE, SHEET, tiny, filled=filled,
+            declared=('It opens quietly', 'It ends loudly'),
             dropped=tuple(p for p in every if p not in kept))
         self.assertEqual(check(results, 'provenance')['verdict'], 'PASS')
+
+    def test_a_drop_with_an_unreadable_budget_cannot_be_justified(self):
+        blind = b.extract_rules('a file with none of the labels')
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        results = b.validate('81 BPM. It opens quietly. It ends loudly.',
+                             GOOD_EXCLUDE, SHEET, blind, filled=filled,
+                             declared=('It opens quietly', 'It ends loudly'),
+                             dropped=tuple(p for p in every if 'BPM' not in p))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('could not be read', entry['detail'])
 
     def test_the_counts_in_the_note_add_up_to_the_pieces(self):
         # A reviewer reads this line immediately before approving a spend, and
@@ -786,6 +819,8 @@ def _decompose(style):
 
 def validate(style, exclude, sheet, rules, mode='custom', names=(),
              filled=None, acknowledged=False, declared=(), dropped=()):
+    # `dropped` is checked against a budget, not taken on trust. See the
+    # allowance below.
     """Check a composed prompt against the Brain's own rules.
 
     `filled` is the slots dict the prompt was supposed to be written from. It
@@ -799,7 +834,9 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
     exclude = exclude or ''
     body = style.lower()
 
-    # Budget
+    # Budget. `cap` is read here and reused by the provenance drop allowance
+    # below, because a drop can only be justified against the cap that forced
+    # it.
     budget = rules['budgets'].get(mode, {})
     cap, target = budget.get('cap'), budget.get('target')
     if cap is UNREADABLE or cap is None:
@@ -945,10 +982,41 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
     present = {key for _, key in pieces}
     unused = sorted(p for p in slot_phrases if p not in present and p not in shed)
 
+    # A drop must be FORCED, and forced by the measurements alone.
+    #
+    # Without this, the obligation the dropped list creates is discharged by
+    # restating it: paste every slot phrase into --dropped and an 859 character
+    # prompt about a converted grain silo, carrying one number from the sheet
+    # and fourteen declared inventions, passes all thirteen checks.
+    #
+    # The intuitive guard does not work and was tried first. "Would it have
+    # fitted" reads as forced whenever the agent filled the budget with its own
+    # prose before dropping anything: style 824 plus dropped 317 against a cap
+    # of 1000 looks like an overflow and is nothing of the kind. Any rule that
+    # measures the drop against the FINISHED style dies to the exact move that
+    # creates the problem.
+    #
+    # So measurements have priority over declarations for the budget. The
+    # allowance is what the slot phrases overflow the cap by, on their own,
+    # before a single word of judgement is added. On this pipeline the slots
+    # total about 325 characters against a Custom cap of 1000, so the allowance
+    # is zero and no drop is ever justified. It becomes positive the day a
+    # richer sheet genuinely does not fit, which is the case the flag exists
+    # for.
+    slot_chars = sum(len(p) for key in SLOT_KEYS for p in filled.get(key, []))
+    dropped_chars = sum(len(d) for d in dropped)
+    if cap is UNREADABLE or cap is None:
+        allowance = None
+    else:
+        allowance = max(0, slot_chars - int(cap))
+
+    measured_chars = sum(len(raw) for raw in from_slots)
+    declared_chars = sum(len(raw) for raw in judgement)
     note = (f'{len(from_slots)} from measurements, {len(judgement)} declared '
             f'as judgement, {len(contested)} declared but matching a measured '
             f'slot, {len(undeclared)} unaccounted, {len(unused)} slot phrases '
-            f'silently unused')
+            f'silently unused; {measured_chars} characters measured against '
+            f'{declared_chars} declared')
     if undeclared:
         results.append(_result(
             'provenance', 'FAIL',
@@ -965,6 +1033,19 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
         results.append(_result(
             'provenance', 'FAIL',
             f'{note}. Measured and left out without being dropped: {unused}'))
+    elif dropped_chars and allowance is None:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. {dropped_chars} characters of measurement were dropped '
+            f'and the budget could not be read, so nothing can justify them'))
+    elif dropped_chars > allowance:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. {dropped_chars} characters of measurement dropped against '
+            f'an allowance of {allowance}: the slot phrases total {slot_chars} '
+            f'characters against a cap of {cap}, so they fit and the drop is '
+            f'not forced. Measurements have priority over judgement for this '
+            f'budget'))
     else:
         results.append(_result('provenance', 'PASS', note))
 
@@ -1005,7 +1086,7 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 45 tests
+Expected: PASS, 47 tests
 
 If `test_a_clean_style_passes_every_check_it_can_run` fails, read which check
 failed and fix the validator, not the fixture, unless the fixture genuinely
@@ -1329,7 +1410,7 @@ missing.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 56 tests
+Expected: PASS, 58 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1650,8 +1731,18 @@ The generation costs the user money, so these come first, in this order.
 3. Compose the style from `slots.json`, then run `prompt --style` until
    `PROMPT_VERDICT=PASS`. Every individual check must read PASS. An `UNKNOWN`
    verdict means a rule could not be read, not that it passed.
-4. Only then ask the user to approve the spend, and say in the same breath which
-   axis is held out and what each of the three outcomes above would mean.
+4. Read the `provenance` detail line before anything else. It ends with the
+   character split, `N characters measured against M declared`. Nothing
+   enforces a ratio there and nothing should, because any threshold would be
+   invented, but it is the number that tells you how much of the prompt was
+   judgement. A prompt carrying every measurement and six hundred characters of
+   its own prose passes every check honestly and is still mostly the agent's
+   taste. The held out axis is the control; this line is the context you read
+   it in.
+5. Only then ask the user to approve the spend, and say in the same breath
+   which axis is held out, what each of the five outcomes above would mean, and
+   that one generation is one sample so "inconclusive, generate again" is a
+   real result.
 
 ## Self-Review
 
