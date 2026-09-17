@@ -246,11 +246,25 @@ def _band(value, bands, fallback):
     return fallback
 
 
+def _facts(sheet):
+    """The sheet's axes, or an empty mapping if it has none of the shape.
+
+    read_facts guarantees the file is a JSON object; it does not guarantee that
+    `facts` is one, or that each axis carries a Fact. A malformed sheet reached
+    `entry.get` and raised a bare AttributeError, which the top level handler
+    turns into 'Details suppressed to protect secrets': the exact unhelpful
+    failure read_facts exists to stop. An axis that is not a Fact is UNUSABLE,
+    which is a thing the command can say out loud.
+    """
+    facts = (sheet or {}).get('facts')
+    return facts if isinstance(facts, dict) else {}
+
+
 def _usable(sheet, axis):
-    entry = (sheet or {}).get('facts', {}).get(axis)
-    if not entry or entry.get('confidence') == 'UNKNOWN':
+    entry = _facts(sheet).get(axis)
+    if not isinstance(entry, dict):
         return None
-    if entry.get('value') is None:
+    if entry.get('confidence') == 'UNKNOWN' or entry.get('value') is None:
         return None
     return entry
 
@@ -291,8 +305,10 @@ def slots(sheet, hold_out=None):
     out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
            'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': [],
            'held_out': hold_out}
-    for axis, entry in (sheet or {}).get('facts', {}).items():
-        if entry.get('confidence') == 'UNKNOWN' or entry.get('value') is None:
+    for axis, entry in _facts(sheet).items():
+        if (not isinstance(entry, dict)
+                or entry.get('confidence') == 'UNKNOWN'
+                or entry.get('value') is None):
             out['unusable'].append(axis)
 
     tempo = None if hold_out == 'tempo' else _usable(sheet, 'tempo')

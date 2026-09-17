@@ -314,6 +314,20 @@ class SlotTests(unittest.TestCase):
     def test_a_known_tempo_asks_nothing(self):
         self.assertEqual(self.slots['ask_first'], [])
 
+    def test_a_malformed_axis_is_unusable_rather_than_a_crash(self):
+        # read_facts guarantees the file is a JSON object, not that every axis
+        # carries a Fact. Reaching entry.get on a non Fact raised a bare
+        # AttributeError, which the top level handler turns into 'Details
+        # suppressed to protect secrets'.
+        for broken in (None, 'a string', 42, ['a', 'list']):
+            filled = b.slots({'facts': {'tempo': broken}})
+            self.assertIn('tempo', filled['unusable'], broken)
+            self.assertEqual(filled['moods'], [], broken)
+
+    def test_a_sheet_with_no_facts_mapping_is_empty_rather_than_a_crash(self):
+        for broken in ({}, {'facts': None}, {'facts': []}, {'facts': 'text'}):
+            self.assertEqual(b.slots(broken)['moods'], [], broken)
+
     def test_an_unknown_tempo_produces_no_bpm_at_all(self):
         filled = b.slots(_sheet_with(tempo={
             'value': None, 'unit': 'bpm', 'confidence': 'UNKNOWN',
