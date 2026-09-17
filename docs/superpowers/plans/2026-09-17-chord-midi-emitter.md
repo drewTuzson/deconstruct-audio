@@ -14,7 +14,7 @@
 
 - Python 3.10 or newer.
 - Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`.
-- Baseline is 97 tests, OK, one skipped. Any drop is a regression.
+- Baseline is 97 tests on `f021646`, OK, one skipped. The fact sheet worktree adds to that count in parallel, so compare against your own branch point rather than against 97.
 - Commands orchestrate. Service modules own the reusable how. Invariant from `AGENTS.md`.
 - The emitter writes no pitch it cannot trace to a measured chord entry.
 - No network call. No audio decoding. This module reads a dict and writes a file.
@@ -23,24 +23,36 @@
 ## The input contract
 
 `midi_emit` consumes the fact sheet produced by the fact sheet plan. It reads
-exactly four things and ignores the rest:
+exactly three things and ignores the rest:
 
 ```python
 sheet['facts']['tempo']['value']            # float, BPM
 sheet['facts']['chords']['value']           # list of chord entries
 sheet['facts']['chords']['confidence']      # KNOW | INFER | UNKNOWN
-sheet['facts']['sections']['value']         # {'count': int, 'boundaries_s': [float]}
 ```
 
 Each chord entry:
 
 ```python
-{'start_s': 0.0, 'end_s': 2.97, 'root': 'F#', 'quality': 'power',
- 'strength': 0.31, 'third_present': False, 'fifth_present': True}
+{'start_s': 5.55, 'end_s': 8.52, 'root': 'F#', 'quality': 'power',
+ 'root_share': 0.31, 'root_margin': 1.42,
+ 'third_present': False, 'fifth_present': True}
 ```
 
-This contract is frozen by the fact sheet plan's Task 4 and Task 5. Build against
-the fixture below; do not wait for the other worktree.
+**There is no `sections` fact.** An earlier draft of this plan named
+`sheet['facts']['sections']['value']` as a fourth input and called the contract
+frozen. It was not. The fact sheet emits `section_boundaries`, a bare list of
+floats, and `section_count`, which is `None` at `UNKNOWN` by construction
+because sixteen segmentation methods failed to resolve it. No real sheet has a
+`sections` key at all.
+
+The emitter never actually read it, so the code was right and the contract was
+wrong. But an implementer building to the written contract would have hit a
+`KeyError` on first integration while every unit test passed against a stale
+fixture, which is the worst shape a defect can take.
+
+Build against the fixture below, which matches the real shape, and run Task 5's
+integration check before calling this done.
 
 ## File Structure
 
@@ -91,25 +103,33 @@ integer of ticks rather than a rounding argument.
 {
   "schema": "deconstruct-audio/facts/1",
   "generated_at": "2026-09-17T00:00:00Z",
-  "source": {"path": "fixture.wav", "sha256": "0", "duration_s": 12.0},
+  "source": {"path": "fixture.wav", "sha256": "0", "duration_s": 16.0},
   "stems_from": "adopted",
   "facts": {
     "tempo": {"value": 80.0, "unit": "bpm", "stem": "drums", "band_hz": null,
               "method": ["tempogram-peak"], "confidence": "KNOW",
               "suno_actionable": "direct", "note": null},
-    "sections": {"value": {"count": 2, "boundaries_s": [0.0, 6.0]},
-                 "unit": "count", "stem": "mix", "band_hz": null,
-                 "method": ["agglomerative"], "confidence": "INFER",
+    "section_boundaries": {"value": [0.0, 3.0, 9.0], "unit": "seconds",
+                 "stem": "mix", "band_hz": null,
+                 "method": ["agglomerative-clustering"], "confidence": "INFER",
                  "suno_actionable": "direct", "note": null},
+    "section_count": {"value": null, "unit": "count", "stem": "mix",
+                 "band_hz": null, "method": ["agglomerative-clustering"],
+                 "confidence": "UNKNOWN", "suno_actionable": "none",
+                 "note": "no method generalised across the corpus"},
     "chords": {"value": [
-        {"start_s": 0.0, "end_s": 3.0, "root": "F#", "quality": "power",
-         "strength": 0.31, "third_present": false, "fifth_present": true},
-        {"start_s": 3.0, "end_s": 6.0, "root": "A", "quality": "major",
-         "strength": 0.28, "third_present": true, "fifth_present": true},
-        {"start_s": 6.0, "end_s": 9.0, "root": "E", "quality": "minor",
-         "strength": 0.26, "third_present": true, "fifth_present": true},
-        {"start_s": 9.0, "end_s": 12.0, "root": "B", "quality": "power",
-         "strength": 0.09, "third_present": false, "fifth_present": false}],
+        {"start_s": 3.0, "end_s": 6.0, "root": "F#", "quality": "power",
+         "root_share": 0.31, "root_margin": 1.55,
+         "third_present": false, "fifth_present": true},
+        {"start_s": 6.0, "end_s": 9.0, "root": "A", "quality": "major",
+         "root_share": 0.28, "root_margin": 1.47,
+         "third_present": true, "fifth_present": true},
+        {"start_s": 9.0, "end_s": 12.0, "root": "E", "quality": "minor",
+         "root_share": 0.26, "root_margin": 1.38,
+         "third_present": true, "fifth_present": true},
+        {"start_s": 12.0, "end_s": 15.0, "root": "B", "quality": "power",
+         "root_share": 0.19, "root_margin": 1.04,
+         "third_present": false, "fifth_present": false}],
       "unit": "sequence", "stem": "guitar", "band_hz": [150, 2500],
       "method": ["beat-sync-chroma"], "confidence": "INFER",
       "suno_actionable": "midi_only", "note": null}
@@ -162,7 +182,8 @@ FIXTURE = json.loads((ROOT / 'tests' / 'fixtures' / 'facts-sample.json')
 
 def entry(**over):
     base = {'start_s': 0.0, 'end_s': 3.0, 'root': 'A', 'quality': 'minor',
-            'strength': 0.3, 'third_present': True, 'fifth_present': True}
+            'root_share': 0.3, 'root_margin': 1.5,
+            'third_present': True, 'fifth_present': True}
     base.update(over)
     return base
 
@@ -237,6 +258,19 @@ information. That is the defect the whole project was built against.
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
 FLATS = {'DB': 'C#', 'EB': 'D#', 'GB': 'F#', 'AB': 'G#', 'BB': 'A#'}
 MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
+# How far the root must beat the second strongest pitch class before the bar
+# gets a chord rather than a sustained root.
+#
+# An earlier draft thresholded on `strength`, the root's share of a normalised
+# 12 bin chroma. That is not a confidence: its floor is 0.083 by construction,
+# and at 0.12 the rule fired on 3 bars out of 163 across the whole corpus, so
+# it was close to a no op wearing the name of a safeguard.
+#
+# 1.25 is a STARTING value and Task 5 Step 2 is where you replace it. Measure
+# the root_margin distribution across all three corpus tracks, put the
+# histogram in the pull request, and set this from that. If the measured
+# distribution says a different number, use it and say so.
+MIN_MARGIN = 1.25
 
 
 class MidiEmitError(Exception):
@@ -302,7 +336,7 @@ git commit -m "feat: chord pitches that write no third they did not measure"
 
 **Interfaces:**
 - Consumes: `chord_pitches` from Task 2.
-- Produces: `progression(sheet, octave=3, min_strength=0.12, ticks_per_beat=480) -> mido.MidiFile`, `LOW_CONFIDENCE_NOTE`.
+- Produces: `progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480, align=True) -> mido.MidiFile`, `low_confidence_bars(sheet, min_margin=MIN_MARGIN) -> list[int]`, `MIN_MARGIN`, `LOW_CONFIDENCE_NOTE`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -333,7 +367,29 @@ class FileTests(unittest.TestCase):
                 starts.add(absolute)
         self.assertEqual(len(starts), 4)
 
-    def test_the_fourth_bar_is_a_sustained_root_because_it_scored_low(self):
+    def test_the_clip_starts_where_the_first_measured_chord_starts(self):
+        first_on = None
+        absolute = 0
+        for msg in self.mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                first_on = absolute
+                break
+        expected = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
+        self.assertEqual(first_on, expected)
+
+    def test_alignment_can_be_turned_off(self):
+        loose = m.progression(FIXTURE, align=False)
+        first_on = None
+        absolute = 0
+        for msg in loose.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                first_on = absolute
+                break
+        self.assertEqual(first_on, 0)
+
+    def test_the_fourth_bar_is_a_sustained_root_because_its_margin_is_low(self):
         bar = self._notes_in_bar(3)
         self.assertEqual(len(bar), 1, f'expected a sustained root, got {bar}')
 
@@ -386,11 +442,12 @@ class FileTests(unittest.TestCase):
             m.progression(no_tempo)
 
     def _notes_in_bar(self, index):
-        """Note numbers whose note_on lands inside bar `index`."""
-        beat = 60.0 / 80.0
-        bar_ticks = int(round(4 * beat * (1 / beat) * self.mid.ticks_per_beat / 1))
+        """Note numbers whose note_on lands inside bar `index`, counted from
+        the first sounding bar rather than from tick zero, because the clip is
+        offset to the first measured chord's start time."""
         bar_ticks = 4 * self.mid.ticks_per_beat
-        low, high = index * bar_ticks, (index + 1) * bar_ticks
+        lead = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
+        low, high = lead + index * bar_ticks, lead + (index + 1) * bar_ticks
         out, absolute = [], 0
         for msg in self.mid.tracks[0]:
             absolute += msg.time
@@ -430,7 +487,8 @@ def _require(sheet, axis):
     return entry['value']
 
 
-def progression(sheet, octave=3, min_strength=0.12, ticks_per_beat=480):
+def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
+                align=True):
     """One bar per measured chord, at the measured tempo, root position."""
     bpm = _require(sheet, 'tempo')
     sequence = _require(sheet, 'chords')
@@ -446,37 +504,48 @@ def progression(sheet, octave=3, min_strength=0.12, ticks_per_beat=480):
                                   denominator=4, time=0))
 
     bar_ticks = BEATS_PER_BAR * ticks_per_beat
-    cursor = 0
+    # Align to the measured timeline. The first measured chord on the reference
+    # track begins at 5.55 s, not at zero, and an earlier draft wrote it at
+    # tick 0 while its self review claimed section timings were mirrored. What
+    # was actually inherited was the chord ORDER. A clip handed to a generator
+    # as a timeline anchor that starts 5.55 s early is not an anchor.
+    lead_ticks = 0
+    if align and sequence:
+        first = float(sequence[0].get('start_s') or 0.0)
+        ticks_per_second = ticks_per_beat * float(bpm) / 60.0
+        lead_ticks = max(0, int(round(first * ticks_per_second)))
     for index, entry in enumerate(sequence):
-        if float(entry.get('strength', 0.0)) < min_strength:
+        margin = entry.get('root_margin')
+        if margin is None or float(margin) < min_margin:
             pitches = [root_midi(entry['root'], octave)]
         else:
             pitches = chord_pitches(entry, octave)
-        start = index * bar_ticks
         for offset, pitch in enumerate(pitches):
-            track.append(mido.Message('note_on', note=pitch, velocity=VELOCITY,
-                                      time=(start - cursor) if offset == 0 else 0))
-            if offset == 0:
-                cursor = start
+            track.append(mido.Message(
+                'note_on', note=pitch, velocity=VELOCITY,
+                time=(lead_ticks if index == 0 else 0) if offset == 0 else 0))
         for offset, pitch in enumerate(pitches):
             track.append(mido.Message('note_off', note=pitch, velocity=0,
                                       time=bar_ticks if offset == 0 else 0))
-        cursor = start + bar_ticks
     track.append(mido.MetaMessage('end_of_track', time=0))
     return mid
 
 
-def low_confidence_bars(sheet, min_strength=0.12):
+def low_confidence_bars(sheet, min_margin=MIN_MARGIN):
     """Bar indices that carry a sustained root, so the fact sheet can name them."""
     sequence = sheet.get('facts', {}).get('chords', {}).get('value') or []
-    return [i for i, e in enumerate(sequence)
-            if float(e.get('strength', 0.0)) < min_strength]
+    out = []
+    for i, e in enumerate(sequence):
+        margin = e.get('root_margin')
+        if margin is None or float(margin) < min_margin:
+            out.append(i)
+    return out
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_midi -v`
-Expected: PASS, 19 tests
+Expected: PASS, 20 tests
 
 If `test_every_note_on_has_a_matching_note_off` fails, the delta time bookkeeping
 in the note_off loop is wrong, not the test. In a mido track every message's
@@ -555,8 +624,9 @@ for msg in m.tracks[0][:8]:
 "
 ```
 Expected: `MIDI_WRITTEN=/tmp/progression.mid`, `SUSTAINED_ROOT_BARS=3`, a
-`set_tempo` matching 80 BPM, and a length near 12 seconds. Paste this into the
-pull request as the after evidence.
+`set_tempo` matching 80 BPM, a first `note_on` at tick 1440 rather than 0
+because the fixture's first chord starts at 3.0 s, and a length near 15
+seconds. Paste this into the pull request as the after evidence.
 
 - [ ] **Step 4: Run the whole suite**
 
@@ -572,7 +642,127 @@ git commit -m "feat: the midi command"
 
 ---
 
-### Task 5: Documentation
+### Task 5: Integration against a real fact sheet, and the margin constant
+
+**Files:**
+- Modify: `tests/test_midi.py`
+
+**Why this task exists.** Every test so far runs against a fixture this plan
+wrote. An earlier draft's fixture encoded a `sections` fact that no real sheet
+produces, and all eighteen tests passed while the written contract was broken.
+A fixture can only ever prove the emitter agrees with its author.
+
+**Interfaces:**
+- Consumes: a real `facts.json` from the fact sheet worktree.
+- Produces: nothing new. This task measures and verifies.
+
+- [ ] **Step 1: Add the integration test**
+
+Append to `tests/test_midi.py` before `if __name__`:
+
+```python
+import os
+
+
+@unittest.skipUnless(os.environ.get('DECONSTRUCT_AUDIO_FACTS'),
+                     'set DECONSTRUCT_AUDIO_FACTS to a real facts.json')
+class RealSheetTests(unittest.TestCase):
+    """The fixture proves the emitter agrees with its author. This proves it
+    agrees with the fact sheet."""
+
+    def setUp(self):
+        self.sheet = json.loads(
+            Path(os.environ['DECONSTRUCT_AUDIO_FACTS']).read_text(encoding='utf-8'))
+
+    def test_the_sheet_carries_every_field_the_contract_names(self):
+        facts = self.sheet['facts']
+        self.assertIn('tempo', facts)
+        self.assertIn('chords', facts)
+        for entry in facts['chords']['value']:
+            for key in ('start_s', 'end_s', 'root', 'quality',
+                        'root_share', 'root_margin', 'third_present'):
+                self.assertIn(key, entry)
+
+    def test_it_writes_a_clip_from_a_real_sheet(self):
+        mid = m.progression(self.sheet)
+        self.assertGreater(mid.length, 1.0)
+
+    def test_the_clip_starts_at_the_first_measured_chord(self):
+        mid = m.progression(self.sheet)
+        first_start = float(self.sheet['facts']['chords']['value'][0]['start_s'])
+        absolute = 0
+        for msg in mid.tracks[0]:
+            absolute += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                break
+        seconds = mido.tick2second(
+            absolute, mid.ticks_per_beat,
+            mido.bpm2tempo(float(self.sheet['facts']['tempo']['value'])))
+        self.assertAlmostEqual(seconds, first_start, delta=0.05)
+```
+
+- [ ] **Step 2: Measure the margin distribution and set MIN_MARGIN**
+
+`MIN_MARGIN = 1.25` is a starting value and this step replaces it. Run it across
+all three corpus fact sheets, not just the reference:
+
+```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
+.venv/bin/python -c "
+import json, statistics, sys
+from pathlib import Path
+for path in sorted(Path('$DESK/evidence').glob('facts-*.json')):
+    seq = json.loads(path.read_text())['facts']['chords']['value'] or []
+    margins = [e['root_margin'] for e in seq if e.get('root_margin') is not None]
+    if not margins:
+        print(path.name, 'no margins'); continue
+    q = statistics.quantiles(margins, n=10)
+    print(f'{path.name:44s} n={len(margins):3d} min={min(margins):.3f} '
+          f'p10={q[0]:.3f} median={statistics.median(margins):.3f} '
+          f'max={max(margins):.3f}')
+"
+```
+
+Set `MIN_MARGIN` from what you see, and put the table in the pull request with
+one sentence saying what the number means. A defensible choice is the value
+that flags the bars where the root genuinely ties with another pitch class,
+which is a margin near 1.0, rather than a round number chosen in advance.
+
+**What not to do.** Do not set it so that a particular count of bars is flagged,
+and do not set it so that a test passes. The earlier draft's constant flagged
+3 bars out of 163 across the whole corpus, which is a safeguard that never
+fires wearing the name of one.
+
+- [ ] **Step 3: Run the integration test against a real sheet**
+
+```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
+DECONSTRUCT_AUDIO_FACTS=$DESK/evidence/facts-murder-she-wrote.json \
+  .venv/bin/python -m unittest tests.test_midi -v
+```
+
+Expected: the three `RealSheetTests` run rather than skip, and pass. If
+`facts-murder-she-wrote.json` does not exist yet, the fact sheet worktree has
+not landed Task 8. Say so in the pull request and mark this step outstanding
+rather than deleting the test.
+
+- [ ] **Step 4: Run the whole suite**
+
+Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`
+Expected: OK, with `RealSheetTests` skipped when the environment variable is unset.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/test_midi.py scripts/midi_emit.py
+git commit -m "test: prove the emitter against a real fact sheet, not only its own fixture"
+```
+
+---
+
+### Task 6: Documentation
 
 **Files:**
 - Modify: `README.md`
@@ -639,12 +829,16 @@ and naming those bars in the output is Task 4 step 1. No melody is structural:
 nothing in the module can emit a pitch that is not a chord tone of a measured
 entry.
 
-Section timings mirroring the measured grid is partially covered. The emitter
-places one chord per bar from the chord sequence, and the chord sequence is built
-on the measured beat grid by the fact sheet plan's Task 4, so the alignment is
-inherited rather than recomputed. That is deliberate: recomputing it here would
-be a second opinion on a grid that already exists, and two grids that disagree is
-worse than one.
+Section timings mirroring the measured grid is now genuinely covered rather
+than asserted. An earlier draft claimed the alignment was "inherited rather than
+recomputed", and what was actually inherited was the chord ORDER: every bar was
+written at `index * bar_ticks` and the first measured chord on the reference
+track begins at 5.55 s, so the clip started 5.55 s early. `progression` now
+offsets the first bar by the first chord's `start_s`, and
+`test_the_clip_starts_where_the_first_measured_chord_starts` proves it. Bar
+widths still come from the measured tempo rather than from each window's own
+duration, which is correct: the windows vary between 1.44 and 3.34 s because
+the last one is a partial bar, and quantising is the point of a chord clip.
 
 **Placeholders.** None. Every step carries its code. Task 5 step 4 points at
 `SKILL.md`'s existing format rather than reproducing it, because that file's
@@ -655,5 +849,7 @@ create a second source for them.
 `list[int]`, and `progression` is its only caller. `root_midi` returns `int` and
 is called by both. `progression` returns `mido.MidiFile`, which Task 4 calls
 `.save()` on. `low_confidence_bars` returns `list[int]` and uses the same
-`min_strength` default as `progression`, which is a real coupling: if one is
+`MIN_MARGIN` default as `progression`, which is a real coupling: if one is
 changed the other must be, and the test for the fourth bar would catch a drift.
+`root_margin` is produced by `chord_sequence` in the fact sheet plan's Task 4
+and is the only field either function thresholds on.

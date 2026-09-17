@@ -78,6 +78,20 @@ shipped exactly that.
 
 Where two methods disagree, both results are reported and nothing is averaged.
 
+The second clause of `KNOW` exists because four axes compute rather than
+estimate. `loudness` is ITU-R BS.1770-4, `instrumentation` is a stem RMS,
+`spectral_balance` is a declared STFT band share and `dynamic_arc` is an RMS
+window series. None has a free parameter that could have been chosen
+differently, so a second method would return the same number by construction
+and demanding one would be theatre. Every axis that genuinely estimates, which
+is tempo, key, tuning, chords, meter and both registers, still needs the first
+clause.
+
+The axis this distinction protects is `key`. It reaches `KNOW` only when its
+template margin clears 0.05 **and** the measured chord sequence's most common
+root is the key's tonic. Grading on the margin alone was tried, and it graded a
+track `KNOW` whose tonic disagreed with its own chord histogram.
+
 ## Axes
 
 The parent spec's stage 2 table, unchanged, plus tuning promoted to a scored axis.

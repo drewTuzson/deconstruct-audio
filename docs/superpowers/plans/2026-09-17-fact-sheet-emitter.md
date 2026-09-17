@@ -138,6 +138,17 @@ class FactShapeTests(unittest.TestCase):
             with self.assertRaises(f.FactError):
                 self.good(value=bad)
 
+    def test_a_container_holding_a_flag_is_still_a_measurement(self):
+        # instrumentation carries one `active` per stem and a chord entry
+        # carries `third_present`. Revision 2 rejected every boolean at every
+        # depth and the sheet raised on its third builder for every track.
+        result = self.good(value={'piano': {'rms_db': -58.29, 'active': False}})
+        self.assertFalse(result['value']['piano']['active'])
+
+    def test_a_bare_boolean_is_still_refused(self):
+        with self.assertRaises(f.FactError):
+            self.good(value=True)
+
     def test_a_numpy_scalar_is_coerced_so_json_can_serialise_it(self):
         import json
         import numpy as np
@@ -212,11 +223,14 @@ def _plain(value):
 def _finite(value):
     """True when value is a real measurement rather than a placeholder.
 
-    Containers pass through: a sections fact carries a dict, a dynamic arc
-    carries a list, and neither is a scalar to range check here.
+    A boolean INSIDE a container is a flag, not a scalar posing as a
+    measurement: `instrumentation` carries one `active` per stem and a chord
+    entry carries `third_present`. Revision 2 rejected every boolean at every
+    depth, which made the third builder raise on every track. A bare boolean
+    is still refused, by fact() before this function is reached.
     """
     if isinstance(value, bool):
-        return False
+        return True
     if isinstance(value, (int, float)):
         return math.isfinite(value)
     if isinstance(value, dict):
@@ -237,6 +251,8 @@ def fact(value, unit, stem, method, confidence, suno_actionable,
         raise FactError('method must be a non-empty list of method names')
     if value is None and confidence != 'UNKNOWN':
         raise FactError('a fact with no value must be graded UNKNOWN')
+    if isinstance(value, bool):
+        raise FactError('a bare boolean is a flag, not a measurement')
     value = _plain(value)
     if value is not None and not _finite(value):
         raise FactError(f'{value!r} is not a measurement')
@@ -252,7 +268,7 @@ def fact(value, unit, stem, method, confidence, suno_actionable,
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 9 tests
+Expected: PASS, 11 tests
 
 - [ ] **Step 5: Commit**
 
@@ -611,6 +627,15 @@ class TuningTests(unittest.TestCase):
         result = c.tuning_estimate(np.zeros(SR * 2, dtype=np.float32), SR)
         self.assertIsNone(result['tuning'])
 
+    def test_an_unexplained_low_bin_is_skipped_rather_than_losing_the_axis(self):
+        # Wrong Turn's bass carries a 2.6 percent artifact at 25.96 Hz, which
+        # is 200 cents from every table entry, while C#1 above it holds 21
+        # percent. Revision 2 returned None for that track.
+        y = self._held([(25.96, 2), (34.65, 24), (46.25, 14)])
+        result = c.tuning_estimate(y, SR, floor=0.02)
+        self.assertEqual(result['tuning'], 'drop C#')
+        self.assertTrue(result['skipped_hz'])
+
     def test_it_reports_the_support_that_earned_the_answer(self):
         y = self._held([(34.65, 6), (36.71, 20)])
         self.assertGreaterEqual(c.tuning_estimate(y, SR)['support'],
@@ -677,11 +702,22 @@ TUNINGS = {
     'drop A#': 29.14,
 }
 # A semitone bin must hold this share of voiced frames to count as a played
-# string rather than noise. Set by the gap in the reference bass histogram:
-# A0 holds 0.70 percent and C#1 holds 6.30, a factor of nine, and 0.02, 0.03
-# and 0.05 were all checked and all return C#1. A constant with a nine times
-# margin on either side is not a constant fitted to one track.
-SUPPORT_FLOOR = 0.02
+# string rather than noise. Set by a sweep across all three corpus bass stems,
+# not by the reference track alone. Revision 2 used 0.02, justified on the
+# reference histogram only, and that value loses the axis entirely on Wrong
+# Turn: a 2.6 percent sub bass artifact at 25.96 Hz clears the floor, sits 200
+# cents from every table entry, and takes the whole axis to None while C#1 with
+# 21.19 percent support sits four semitones above it.
+#
+#   floor   Murder She Wrote   Wrong Turn      The Danger of Caring
+#   0.020   drop C# 34.65      None 25.96      drop C# 34.65
+#   0.030   drop C# 34.65      drop C# 34.65   drop C# 34.65
+#   0.040   drop C# 34.65      drop C# 34.65   drop C# 34.65
+#   0.050   drop C# 34.65      drop C# 34.65   standard E 41.20
+#   0.080   drop D  36.71      drop C# 34.65   standard E 41.20
+#
+# The three track agreement window is 0.03 to 0.04. 0.035 is its middle.
+SUPPORT_FLOOR = 0.035
 MAX_CENTS = 60.0
 SILENCE = 1e-6
 
@@ -752,7 +788,7 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
     """
     y = np.asarray(y, dtype=np.float32)
     empty = {'tuning': None, 'lowest_hz': None, 'support': None,
-             'margin_cents': None}
+             'margin_cents': None, 'skipped_hz': None}
     if len(y) == 0 or np.max(np.abs(y)) < SILENCE:
         return empty
     low = band_limit(y, sr, 25.0, high)
@@ -765,27 +801,35 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
     bins = np.round(librosa.hz_to_midi(f0)).astype(int)
     values, counts = np.unique(bins, return_counts=True)
     share = counts / counts.sum()
-    supported = values[share >= floor]
-    if not len(supported):
+    supported = sorted(int(v) for v in values[share >= floor])
+    if not supported:
         return empty
-    lowest_midi = int(supported.min())
-    support = float(share[values == lowest_midi][0])
-    lowest = float(librosa.midi_to_hz(lowest_midi))
-    ranked = sorted(
-        (abs(1200 * math.log2(lowest / hz)), name) for name, hz in TUNINGS.items())
-    best_cents, best_name = ranked[0]
-    if best_cents > MAX_CENTS:
-        return {'tuning': None, 'lowest_hz': round(lowest, 2),
-                'support': round(support, 4),
-                'margin_cents': round(best_cents, 1)}
-    return {'tuning': best_name, 'lowest_hz': round(lowest, 2),
-            'support': round(support, 4), 'margin_cents': round(best_cents, 1)}
+    # Walk up. One sub bass artifact should not take the whole axis to None
+    # when a bin with real support sits a few semitones above it. Each
+    # candidate is tried against the table in pitch order and the first that
+    # lands within MAX_CENTS wins, so a skipped bin is a bin no tuning
+    # explains rather than a bin that was ignored.
+    skipped = []
+    for midi in supported:
+        lowest = float(librosa.midi_to_hz(midi))
+        support = float(share[values == midi][0])
+        ranked = sorted((abs(1200 * math.log2(lowest / hz)), name)
+                        for name, hz in TUNINGS.items())
+        best_cents, best_name = ranked[0]
+        if best_cents <= MAX_CENTS:
+            return {'tuning': best_name, 'lowest_hz': round(lowest, 2),
+                    'support': round(support, 4),
+                    'margin_cents': round(best_cents, 1),
+                    'skipped_hz': skipped or None}
+        skipped.append(round(lowest, 2))
+    return {'tuning': None, 'lowest_hz': skipped[0] if skipped else None,
+            'support': None, 'margin_cents': None, 'skipped_hz': skipped}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_chords -v`
-Expected: PASS, 14 tests
+Expected: PASS, 15 tests
 
 - [ ] **Step 5: Prove both estimators on the real reference stems**
 
@@ -823,7 +867,7 @@ git commit -m "feat: key from summed stems, tuning from the lowest sustained sem
 
 **Interfaces:**
 - Consumes: `band_limit`, `_summed` from Task 3.
-- Produces: `chord_sequence(signals, sr, beat_times, bars_per_chord=1, low=150, high=2500) -> list[dict]` where each entry is `{'start_s', 'end_s', 'root', 'quality', 'strength', 'third_present', 'fifth_present'}` with `quality` in `('major', 'minor', 'power')`, and `harmonic_rhythm(sequence) -> dict` with keys `chords_per_bar`, `median_chord_bars`, `label`.
+- Produces: `chord_sequence(signals, sr, beat_times, bars_per_chord=1, low=150, high=2500) -> list[dict]` where each entry is `{'start_s', 'end_s', 'root', 'quality', 'root_share', 'root_margin', 'third_present', 'fifth_present'}` with `quality` in `('major', 'minor', 'power')`, and `harmonic_rhythm(sequence) -> dict` with keys `chords_per_bar`, `median_chord_bars`, `label`.
 
 `quality` is `'power'` when the third is not present. That is not a fallback, it
 is the measurement: most distorted guitar is genuinely ambiguous between major
@@ -879,7 +923,8 @@ class ChordSequenceTests(unittest.TestCase):
                 for _ in range(length):
                     out.append({'start_s': float(tick), 'end_s': float(tick + 1),
                                 'root': c.NOTES[index % 12], 'quality': 'power',
-                                'strength': 0.3, 'third_present': False,
+                                'root_share': 0.3, 'root_margin': 1.5,
+                                'third_present': False,
                                 'fifth_present': True})
                     tick += 1
             return out
@@ -959,10 +1004,20 @@ def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
         else:
             quality = 'power'
             third_present = False
+        # root_share is the root's share of a normalised 12 bin chroma, whose
+        # floor is 0.083 by construction, so it is not a confidence and must
+        # not be used as one. root_margin is: how far the winner beat the
+        # runner up. A bar where two pitch classes tie has margin near 1.0
+        # however healthy its share looks.
+        ordered = np.sort(profile)[::-1]
+        second = float(ordered[1]) if len(ordered) > 1 else 0.0
+        margin = float(root_energy / second) if second > 0 else float('inf')
         out.append({'start_s': round(float(start), 3),
                     'end_s': round(float(end), 3),
                     'root': NOTES[root], 'quality': quality,
-                    'strength': round(root_energy, 4),
+                    'root_share': round(root_energy, 4),
+                    'root_margin': (round(margin, 3)
+                                    if math.isfinite(margin) else None),
                     'third_present': third_present,
                     'fifth_present': bool(fifth >= FIFTH_RATIO)})
     return out
@@ -1186,16 +1241,30 @@ LOW_END_HZ = 150.0
 AIR_HZ = 5000.0
 N_FFT = 2048
 # A stem counts as present when its RMS is within this many dB of the loudest
-# stem. Relative, not absolute, so it does not move with mastering level. On
-# the reference track the loudest stem is bass at -19.07 dBFS and piano sits at
-# -58.29, which is 39 dB down and correctly reads absent: that track has no
-# piano. The other five span -19.07 to -41.61 and all read present.
-PRESENCE_DB = 30.0
+# stem. Relative, not absolute, so it does not move with mastering level.
+#
+# Swept across all three corpus tracks, not just the reference. At 30 dB the
+# `other` stem on Wrong Turn sits 0.62 dB from flipping to absent, and this
+# axis is suno_actionable direct, so a flip changes what the prompt says the
+# track contains. At 35 dB every `other` stem clears by at least 2.2 dB and
+# both piano stems still read absent by at least 4.2 dB, which is correct:
+# neither track has a piano.
+PRESENCE_DB = 35.0
 # Per second window threshold for the intro's arrangement density curve. The
 # intro rule below returns the same answer at -35, -40 and -45 on the reference
 # track, so this constant is not load bearing.
 ACTIVE_DB = -40.0
 INTRO_SNAP_S = 4.0
+# An intro lives near the beginning. Without a window, a post breakdown re
+# entry two thirds of the way through a track competes with it and wins.
+INTRO_WINDOW_S = 60.0
+INTRO_WINDOW_FRACTION = 0.4
+# The winning beat grouping must beat the runner up by this ratio. Measured: on
+# the reference track 3 scores 16526.6 against 4 at 14573.1, a ratio of 1.134,
+# and the axis reads 3 on two of three tracks in a genre whose prior is
+# overwhelmingly 4/4. Below this margin the axis says UNKNOWN rather than
+# shipping a coin toss into a prompt as a statement.
+METER_MARGIN = 1.15
 
 SECTION_COUNT_NOTE = (
     'Sixteen structure segmentation methods were run at one fixed '
@@ -1205,7 +1274,10 @@ SECTION_COUNT_NOTE = (
     'selection on the one track that has one. Reporting a count that is about '
     'half likely to be wrong is worse than reporting none, because a stated '
     'number invites downstream use that a missing one does not. Boundaries are '
-    'emitted separately and are real.')
+    'emitted separately. Note that the boundary hit rates in that study were '
+    'scored against this pipeline\'s own incumbent boundaries rather than human '
+    'annotation, because the known ground truth is a count and not a boundary '
+    'list, so they measure agreement with the incumbent rather than correctness.')
 
 
 def _sha256(path):
@@ -1316,12 +1388,26 @@ def _key_fact(paths, loaded, mix, sr, local, built):
         return fact(None, 'name', 'guitar+bass', ['chroma-cqt-krumhansl'],
                     'UNKNOWN', 'direct', band_hz=band,
                     note='no key resolved')
-    grade = 'KNOW' if result['margin'] >= 0.05 else 'INFER'
+    # The cross check, restored. Revision 1 required the margin AND agreement
+    # with the chord sequence's most common root; revision 2 dropped the second
+    # half and graded on margin alone. Measured cost of dropping it: Wrong Turn
+    # scores C# minor at margin 0.0584 while its most common chord root is E,
+    # its relative major, and that would have been graded KNOW. The check was
+    # doing real work.
+    sequence = (built.get('chords') or {}).get('value') or []
+    roots = [e['root'] for e in sequence]
+    common = max(set(roots), key=roots.count) if roots else None
+    tonic = result['key'].split()[0]
+    agrees = common is not None and common == tonic
+    grade = 'KNOW' if (result['margin'] >= 0.05 and agrees) else 'INFER'
+    runner = result['scores'][1][0] if len(result['scores']) > 1 else 'none'
     return fact(result['key'], 'name', 'guitar+bass',
-                ['chroma-cqt-krumhansl'], grade, 'direct', band_hz=band,
-                note=f'margin {result["margin"]} over the runner up '
-                     f'{result["scores"][1][0] if len(result["scores"]) > 1 else "none"}. '
-                     f'These are template correlations, not probabilities.')
+                ['chroma-cqt-krumhansl', 'chord-root-histogram'], grade,
+                'direct', band_hz=band,
+                note=f'margin {result["margin"]} over the runner up {runner}; '
+                     f'most common chord root {common}, tonic {tonic}, '
+                     f'{"agree" if agrees else "disagree"}. These are template '
+                     f'correlations, not probabilities.')
 ```
 
 ```python
@@ -1365,7 +1451,9 @@ def _chords_fact(paths, loaded, mix, sr, local, built):
     return fact(sequence, 'sequence', 'guitar+bass', ['beat-sync-chroma'],
                 'INFER', 'midi_only', band_hz=band,
                 note=f'{len(sequence)} bars, {powers} with no measured third. '
-                     f'Chord names are midi_only: text prompts discard them.')
+                     f'Chord names are midi_only: text prompts discard them. '
+                     f'root_share is a normalised chroma share with a 0.083 '
+                     f'floor and is not a confidence; root_margin is.')
 
 
 def _harmonic_rhythm_fact(paths, loaded, mix, sr, local, built):
@@ -1408,43 +1496,78 @@ is the legitimate use of `UNKNOWN`: a method that genuinely cannot resolve.
 
 ```python
 def _intro_fact(paths, loaded, mix, sr, local, built):
+    """How long before the arrangement reaches its working density.
+
+    Three guards, each closing a way this returned a confident wrong answer.
+
+    The track may have no intro. The Danger of Caring is at density 5 in its
+    first second and never rises again; its only density increases are a
+    post breakdown re entry at 123 s and another at 151 s. Revision 2 returned
+    123.41 s on a 205.8 s track and graded it KNOW.
+
+    The step must be near the beginning. An intro is a position, not just a
+    shape, and without a window any later re entry competes with it.
+
+    The step must rise OUT of a thin passage. A step from an already typical
+    density is an arrangement change, not the end of an intro.
+    """
     window = int(sr)
     count = min(len(y) for y in loaded.values()) // window
     if count < 3:
         return fact(None, 'seconds', 'mix', ['stem-density-step'],
                     'UNKNOWN', 'direct', note='too short to read a density step')
-    density = []
-    for i in range(count):
-        active = sum(1 for y in loaded.values()
-                     if _rms_db(y[i * window:(i + 1) * window]) > ACTIVE_DB)
-        density.append(active)
+    density = [sum(1 for y in loaded.values()
+                   if _rms_db(y[i * window:(i + 1) * window]) > ACTIVE_DB)
+               for i in range(count)]
+    typical = float(np.median(np.asarray(density)))
+
+    if density[0] >= typical:
+        return fact(0.0, 'seconds', 'mix', ['stem-density-step'], 'INFER',
+                    'direct',
+                    note=f'the arrangement is already at its typical density of '
+                         f'{typical:g} stems in the first window, so there is no '
+                         f'intro to measure')
+
+    limit = max(1, int(min(INTRO_WINDOW_S, INTRO_WINDOW_FRACTION * count)))
     steps = np.diff(np.asarray(density))
-    if not len(steps) or steps.max() <= 0:
-        return fact(None, 'seconds', 'mix', ['stem-density-step'],
-                    'UNKNOWN', 'direct',
-                    note='arrangement density never increases')
-    raw = float(int(np.argmax(steps)) + 1)
+    candidates = [(int(steps[i]), i + 1) for i in range(min(len(steps), limit))
+                  if steps[i] > 0 and density[i] < typical]
+    if not candidates:
+        return fact(None, 'seconds', 'mix', ['stem-density-step'], 'UNKNOWN',
+                    'direct',
+                    note=f'no density step out of a thin passage in the first '
+                         f'{limit} s')
+    size, raw_index = max(candidates, key=lambda c: (c[0], -c[1]))
+    raw = float(raw_index)
     boundaries = (built.get('section_boundaries') or {}).get('value') or []
     near = [b for b in boundaries if abs(b - raw) <= INTRO_SNAP_S]
     if near:
         snapped = min(near, key=lambda b: abs(b - raw))
         return fact(round(float(snapped), 2), 'seconds', 'mix',
                     ['stem-density-step', 'agglomerative-clustering'],
-                    'KNOW', 'direct',
-                    note=f'largest arrangement density step at {raw:.0f} s, '
-                         f'confirmed by a section boundary at {snapped:.2f} s')
+                    'INFER', 'direct',
+                    note=f'density rose by {size} stems at {raw:.0f} s out of a '
+                         f'passage below the typical {typical:g}, and a section '
+                         f'boundary sits at {snapped:.2f} s. Two methods agreeing '
+                         f'on a position is not cross validation of a length, so '
+                         f'this stays INFER.')
     return fact(raw, 'seconds', 'mix', ['stem-density-step'], 'INFER', 'direct',
-                note=f'largest arrangement density step at {raw:.0f} s, with no '
+                note=f'density rose by {size} stems at {raw:.0f} s, with no '
                      f'section boundary within {INTRO_SNAP_S:g} s to confirm it')
 ```
 
-The rule is the largest single window increase in the number of active stems.
-Revision 1 waited for the count to reach its track wide maximum, which waits for
-the last stem to enter and returned about 88 seconds against a known 12.1. The
-rule above returns 12 seconds at `ACTIVE_DB` of -35, -40 and -45, a 10 dB
-spread, and snaps to the measured boundary at 12.12. A rule whose answer does
-not move across a 10 dB change in its only constant is reading the arrangement,
-not the constant.
+Measured on all three corpus tracks before being written here:
+
+| Track | Duration | Typical density | First window | Result |
+|---|---|---|---|---|
+| Murder, She Wrote | 138 s | 4 | 1 stem | 12 s, snapped to 12.12, known 12.1 |
+| Wrong Turn | 153 s | 4 | 0 stems | 4 s |
+| The Danger of Caring | 205 s | 4 | 5 stems | 0.0, no intro |
+
+The grade is `INFER` in every branch. Revision 2 granted `KNOW` when a section
+boundary sat within 4 s, and on The Danger of Caring a boundary sat 0.41 s from
+a wrong answer. Two methods agreeing on a position is not cross validation of a
+length.
 
 ```python
 def _loudness_fact(paths, loaded, mix, sr, local, built):
@@ -1529,15 +1652,26 @@ def _meter_fact(paths, loaded, mix, sr, local, built):
     for grouping in (3, 4):
         lag = int(round(frames_per_beat * grouping))
         scores[grouping] = float(ac[lag]) if 0 < lag < len(ac) else float('-inf')
-    best = max(scores, key=scores.get)
-    if not math.isfinite(scores[best]):
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best, best_score = ranked[0]
+    runner_score = ranked[1][1]
+    detail = ', '.join(f'{k} scored {v:.3f}' for k, v in sorted(scores.items()))
+    if not math.isfinite(best_score) or runner_score <= 0:
         return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
                     'UNKNOWN', 'direct', note='autocorrelation lag out of range')
+    if best_score / runner_score < METER_MARGIN:
+        return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
+                    'UNKNOWN', 'direct',
+                    note=f'{detail}, a margin of '
+                         f'{best_score / runner_score:.3f} which is under '
+                         f'{METER_MARGIN}. Unnormalised autocorrelation at two '
+                         f'lags cannot separate 3 from 4 on this material, and '
+                         f'meter is suno_actionable direct, so a coin toss '
+                         f'would reach the prompt as a statement.')
     return fact(best, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
                 'INFER', 'direct',
-                note=f'3 scored {scores[3]:.3f}, 4 scored {scores[4]:.3f}. '
-                     f'Published benchmarks put meter identification well below '
-                     f'the other axes and this is one method.')
+                note=f'{detail}. Published benchmarks put meter identification '
+                     f'well below the other axes and this is one method.')
 
 
 def _lead_register_fact(paths, loaded, mix, sr, local, built):
@@ -1553,13 +1687,15 @@ def _vocal_register_fact(paths, loaded, mix, sr, local, built):
 - [ ] **Step 5: Write the assembler, the projection and the renderer**
 
 ```python
+# Order matters and is load bearing in three places: chords reads tempo, key
+# reads chords for its cross check, and intro_seconds reads section_boundaries.
 BUILDERS = (
     ('tempo', _tempo_fact),
     ('meter', _meter_fact),
     ('instrumentation', _instrumentation_fact),
-    ('key', _key_fact),
     ('tuning', _tuning_fact),
     ('chords', _chords_fact),
+    ('key', _key_fact),
     ('harmonic_rhythm', _harmonic_rhythm_fact),
     ('section_boundaries', _section_boundaries_fact),
     ('section_count', _section_count_fact),
@@ -1780,17 +1916,26 @@ And in `score`, beside the `key` branch:
 
 - [ ] **Step 4: Update the four assertions the new axis moves**
 
-In `tests/test_compare.py`:
+In `tests/test_compare.py`. Every number below was measured by scoring the
+updated `REFERENCE` through an eight gate `compare`, not reasoned about:
 
-1. Add `'tuning': 'drop C#'` to `REFERENCE` at line 10.
-2. `self.assertEqual(len(result['axes']), 7)` becomes `8`.
-3. `self.assertEqual(result['unmeasured'], 5)` becomes `6`.
-4. Both `self.assertEqual(result['unmeasured'], 1)` become `2`.
+| Edit | From | To |
+|---|---|---|
+| Add `'tuning': 'drop C#'` to `REFERENCE` | absent | present |
+| `len(result['axes'])` | 7 | 8 |
+| `result['unmeasured']` in the partial-measurement counts test | 5 | 6 |
+| `verdicts.count('UNKNOWN')` in the all-axes test | 6 | 7 |
+| both `result['measured']` assertions | 6 | 7 |
+| both `result['unmeasured'] == 1` assertions | 1 | **unchanged, still 1** |
 
-Read each one before changing it and confirm the new number from the test's own
-setup rather than from this list. If a number here disagrees with what the test
-actually constructs, the test is right and this list is wrong. Say so in the
-pull request.
+The last two rows are the ones that bite. Revision 2 told you to change the
+`unmeasured == 1` assertions to 2 and said nothing about `measured` or the
+`UNKNOWN` count. Both were wrong: adding a tuning axis that the candidate DOES
+carry moves `measured` from 6 to 7 and leaves `unmeasured` at 1.
+
+Derive each number from the test's own setup before you change it. Neither this
+table nor the existing assertion is authoritative; the code is. If your reading
+disagrees with this table, say so in the pull request with the output you got.
 
 - [ ] **Step 5: Run the whole suite**
 
@@ -1982,6 +2127,10 @@ import facts as facts_mod
 
 HOME = Path(os.path.expanduser('~'))
 DESKTOP = HOME / 'Desktop' / 'mydaiarytoyou!'
+# Axes every track must resolve. section_count is deliberately absent: it is
+# UNKNOWN by construction on every track and always will be.
+CORE_AXES = ('tempo', 'key', 'tuning', 'intro_seconds', 'loudness')
+
 CORPUS = [
     {'name': 'Murder, She Wrote',
      'audio': HOME / 'Downloads' /
@@ -2023,7 +2172,7 @@ def main():
     parser.add_argument('--out', type=Path, default=None)
     args = parser.parse_args()
 
-    held, checked = 0, 0
+    held, checked, resolved = 0, 0, 0
     for track in CORPUS:
         if not track['audio'].exists():
             print(f'TRACK={track["name"]} STABLE=missing PATH={track["audio"]}')
@@ -2046,7 +2195,14 @@ def main():
         projected = facts_mod.scorable(first)
         unresolved = sorted(a for a, e in first['facts'].items()
                             if e['confidence'] == 'UNKNOWN')
+        # A track that silently loses a core axis must not leave the gate green.
+        # Revision 2 printed CORPUS_STABLE=3/3 and exit 0 for a corpus where one
+        # track had lost its tuning axis entirely, because an axis that resolves
+        # to UNKNOWN is perfectly stable across reruns.
+        lost = [a for a in CORE_AXES if a in unresolved]
+        resolved += 0 if lost else 1
         print(f'TRACK={track["name"]} STABLE={state} '
+              f'CORE={"ok" if not lost else "lost:" + ",".join(lost)} '
               f'SCORABLE={json.dumps(projected, sort_keys=True)} '
               f'UNRESOLVED={",".join(unresolved) or "none"}')
         if args.out:
@@ -2056,11 +2212,12 @@ def main():
             (args.out / f'scorable-{slug(track["name"])}.json').write_text(
                 json.dumps(projected, indent=2, allow_nan=False),
                 encoding='utf-8')
+    print(f'CORPUS_RESOLVED={resolved}/{len(CORPUS)} CORE={",".join(CORE_AXES)}')
     if args.rerun:
         print(f'CORPUS_STABLE={held}/{len(CORPUS)}')
-        return 0 if held == len(CORPUS) else 2
+        return 0 if (held == len(CORPUS) and resolved == len(CORPUS)) else 2
     print(f'CORPUS_STABLE=unchecked/{len(CORPUS)}')
-    return 0
+    return 0 if resolved == len(CORPUS) else 2
 
 
 if __name__ == '__main__':
@@ -2074,7 +2231,17 @@ cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
 DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
 .venv/bin/python scripts/corpus_check.py --rerun --out $DESK/evidence
 ```
-Expected: `CORPUS_STABLE=3/3`
+Expected, both lines:
+
+```
+CORPUS_RESOLVED=3/3 CORE=tempo,key,tuning,intro_seconds,loudness
+CORPUS_STABLE=3/3
+```
+
+`CORPUS_RESOLVED` is not decoration either. Revision 2's gate printed
+`CORPUS_STABLE=3/3` and exited 0 for a corpus in which Wrong Turn had lost its
+tuning axis completely, because an axis that resolves to `UNKNOWN` is perfectly
+stable across reruns. A sheet can hold still and still say nothing.
 
 - [ ] **Step 4: Score the reference against its known values. This is the entry bar.**
 
