@@ -12,6 +12,14 @@ Connection means the host agent uses the user's Brain rules with the analysis. I
 
 A saved path alone is CONFIGURED. Sources read plus a demonstrated prompt is VERIFIED FOR THIS HOST SESSION. Refresh the sources after context loss or Brain updates. Read configuration through a narrow helper or extract only `brain_path` from config.json; never open credentials.json. Use `disconnect-brain` to remove the pointer without deleting the Brain.
 
+## Composing from measured facts: the prompt command
+
+`prompt <facts.json>` composes from measured facts only. It reads the fact sheet and nothing else, fills the Brain's slots from it, and checks a composed style against rules it extracts from your own Brain text at runtime. No Brain content is stored in this package: the rules are located in your files every run, so updating your Brain updates the checks rather than leaving a frozen copy quietly unenforced.
+
+It reads `brain_path` through a narrow config helper and never opens `credentials.json`. `RULES_FROM=` names the source file the rules were read from, which is whichever instruction source actually carries them rather than a fixed preference.
+
+A `RULE_UNREADABLE=<name>` line means that rule's wording has moved and the extraction needs widening for that one pattern. It is reported, never passed over: a check that could not find its rule is not a check that succeeded, and the verdict is `UNKNOWN` rather than `PASS`. Widen the one pattern and add a test for the wording it missed rather than leaving a rule unenforced.
+
 ## ChatGPT Custom GPT, Claude Project, or other chat-only Brain
 
 The local scripts cannot reach into another conversation or execute just because a file was uploaded. Run analysis in an agent host that supports local tools. Give the user the reviewed report and a short handoff instruction to upload/paste it into the Brain-enabled chat, asking it to use the report as reference evidence for the desired mode. Do not include secrets, local paths, raw audio, or Brain source files in the handoff.

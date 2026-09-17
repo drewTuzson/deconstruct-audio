@@ -76,6 +76,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
 | `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
 | `research <facts.json>` | Records scene and era claims gathered for a supplied artist or song name, in their own file, and prints every collision with a measured fact. The measurement is authoritative on every collision |
+| `prompt <facts.json>` | Fills your connected Brain's slots from the fact sheet alone and, when given a composed style, checks it against the Brain's own rules: budget, negation, hyphens, banned words, direction prose, BPM placement, and whether every number traces to a measurement. Exit code carries the verdict |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -156,6 +157,47 @@ gathered, each carrying `axis`, `value`, `source` and a `confidence` of `KNOW`,
 `tempo_bpm` from `scorable.json` meets the sheet's `tempo` rather than slipping
 through as context.
 
+## Writing the prompt from the facts
+
+`prompt` reads `facts.json` and nothing else. Not the listening assessment, not
+the impressions, not the report. If a prompt built only from measurements works,
+the measurement path is what produced the result, which is the claim this whole
+project makes.
+
+The Brain's rules are read from your own Brain folder every run rather than
+copied into this package, so updating your Brain updates the checks. A rule the
+text does not yield is reported as `UNKNOWN`, never as a pass: a check that could
+not find its rule is not a check that succeeded. `RULES_FROM=` names the file the
+rules were read from, and a `RULE_UNREADABLE=` line means the wording moved and
+that one pattern needs widening.
+
+```
+prompt facts.json                       # fills the slots, checks nothing
+prompt facts.json --style style.txt \
+  --exclude exclude.txt \
+  --added "Post Hardcore" --added "defiant"
+```
+
+Composition stays with the agent. The command fills the slots and then checks
+what was written, including whether every number traces back to a measured fact,
+with the unit it was measured in. Both fields are read, because the exclude field
+reaches the generator the same way the style does: a model number such as `909`
+traces to nothing and fails wherever you put it. A number that does not trace is
+the failure mode this tool was built against, and it is a `FAIL`, not a warning.
+
+Provenance closes in both directions. Every tag and sentence in the style either
+matches a slot phrase, meaning it came from a measurement, or is declared as the
+agent's own judgement with `--added`. Every slot phrase either appears in the
+style or is named in `--dropped`, and a drop has to be forced by the character
+budget rather than merely asserted. Anything unaccounted on either side fails, so
+"written from the fact sheet alone" is something a reader can check rather than
+something to take on trust.
+
+`--hold-out` keeps one measured axis out of the prompt on purpose while the
+scorer still measures it on both sides. It is the control: if the carried axes
+match the reference and the held out one does not, the fact sheet is what carried
+the result. It defaults to `lead_register`.
+
 ## Saved styles
 
 When a generation comes out the way you wanted, keep the style text that produced it:
@@ -209,7 +251,7 @@ If you already own SunoGPT's Brain, `connect-brain` saves a pointer to your loca
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The 80 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
+The 330 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
 
 The release in this repository is the revision its author ran end to end on macOS. The Windows and Linux code paths are written and covered by mocked tests, but have not been exercised on those operating systems.
 

@@ -60,6 +60,20 @@ Never promote a research claim into a fact. A claim that speaks to an axis the s
 
 A claim on an axis nothing measured is kept as context. It is usable for what no measurement covers, such as the scene or the era a sound belongs to, and describing that scene is a legitimate use of it. It never becomes a number in a prompt.
 
+## The prompt from the facts: prompt
+
+`prompt <facts.json>` fills the Brain's slots from the fact sheet alone and prints `SLOTS_WRITTEN=<path>`, `RULES_FROM=<file>` and `HELD_OUT=<axis>`. It reads `facts.json` and nothing else: not `listening.md`, not `impressions.md`, not `report.md`. That is the point, because a prompt built from prose is what this pipeline replaced.
+
+Compose the style yourself from `slots.json` plus your own genre judgment. The script fills and checks; it does not have taste. Never quote a number the fact sheet did not measure: every number in the style and in the exclude field has to trace to a slot phrase, with the unit it was measured in, and one that does not is a `FAIL`. A model number such as `909` or a year such as `1987` fails wherever you put it, because nothing measured either.
+
+Declare what you added. Every tag and every sentence in the style must either be a slot phrase, which means it came from a measurement, or be named with `--added` as your own judgment. A genre, a subgenre and an era are judgment. A register, a tuning and a BPM are measurements. Every slot phrase must also appear in the style or be named with `--dropped`, and a drop has to be forced by the character budget. Listing a measurement as dropped when it would have fitted is refused.
+
+Answer every `ASK_FIRST=` line with the user before composing, then pass `--acknowledge`. An `INFER` tempo carrying a competing metrical level is the most expensive thing on this list to get wrong, and the script will not choose a metrical level for you.
+
+Rerun `prompt --style` until `PROMPT_VERDICT=PASS`, before anything is generated. Every individual check must read `PASS`. `UNKNOWN` means a rule could not be read from the Brain, not that it passed, and a `RULE_UNREADABLE=` line names which one. The exit code carries the verdict: 0 PASS, 2 FAIL, 4 UNKNOWN.
+
+Read the `provenance` detail line aloud when you ask the user to approve the spend. It ends with `N characters measured against M declared`, and nothing enforces a ratio there, so that number is the only thing telling anyone how much of the prompt was judgment. Say in the same breath which axis is held out and that one generation is one sample.
+
 ## Use with the Brain
 
 When the user wants a Suno prompt and a Brain is configured, read [references/brain.md](references/brain.md). Load the user's own Brain instructions, determine the requested Suno mode, and use the reviewed report as source evidence. Keep faithful analysis separate from mode-specific prompt choices. Count exact output field characters against that user's loaded rules; do not ship one person's limits or preferences as universal Suno requirements.
