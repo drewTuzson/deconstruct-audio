@@ -6,22 +6,52 @@
 
 **Architecture:** A new `facts.py` owns the `Fact` shape and assembles the sheet. A new `chords.py` owns the harmonic measurements that need band-limited stems. `compare.py` gains one axis. `deconstruct.py` gains one thin command. A `corpus_check.py` runs the whole corpus twice and diffs, which is how rerun stability becomes a gate rather than a hope.
 
-**Tech Stack:** Python 3.10+, librosa, numpy, soundfile, ffmpeg, demucs (already installed).
+**Tech Stack:** Python 3.10+, librosa, numpy, scipy, soundfile, ffmpeg, demucs (all installed).
 
 **Spec:** `docs/superpowers/specs/2026-09-17-fact-sheet-emitter-design.md`
+
+**Revision:** This is revision 2. Revision 1 was reviewed by an independent critic
+and returned LOSE: executed as written it missed three of six bar axes, broke five
+existing tests, and violated two repo invariants. Every number in this revision
+that fixes one of those was measured on the real corpus first, and the evidence
+sits in `/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17/evidence/`:
+`CRITIC-plan-review.md`, `MEASUREMENT-DECISIONS.md`, `SECTIONS-research.md`.
 
 ## Global Constraints
 
 - Python 3.10 or newer. `ffmpeg` and `ffprobe` on `PATH`.
-- Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`. Worktrees deliberately do not each build a venv, because torch is 2.5 GB and four copies of it is not a test strategy. The interpreter supplies libraries; the scripts resolve from your worktree's cwd.
+- Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`. Worktrees do not build their own venv; `AGENTS.md` now says so.
 - Baseline is 97 tests, OK, one skipped. Any drop is a regression.
 - Commands orchestrate and print a machine-readable result line. Service modules own the reusable how. This split is an invariant in `AGENTS.md`.
+- **Never import a librosa-pulling module at the top of `deconstruct.py`.** There is a comment at `scripts/deconstruct.py:22` explaining why: `doctor` exists to diagnose an incomplete install, and a module-level import makes it traceback before the handler that hides local paths. Import inside the command.
+- **Use `secure_config_dir()`, not `config_dir()`, anywhere a directory gets created.** `scripts/deconstruct.py:67` documents the bug that made this necessary: `mkdir(parents=True, mode=)` sets the mode on the leaf only, so creating a cache underneath left the folder that later holds `credentials.json` at 0755 permanently.
 - Every emitted measurement carries its method and a confidence grade of `KNOW`, `INFER`, or `UNKNOWN`. Construction raises otherwise.
-- Private files: directories at `0700`, files written via `tempfile.mkstemp` then `os.replace`. Never widen a mode, never write in place.
+- **`UNKNOWN` is for a method that genuinely could not resolve. It is never for a value that resolved and missed a gate.** The critic found that `scorable` omitting `UNKNOWN` axes, plus `compare` scoring only axes present on both sides, lets a sheet grade its failures `UNKNOWN` and print `VERDICT=PASS` having measured nothing. Task 8 closes that by asserting the measured count, not just the verdict.
+- Every numeric value written into the sheet passes through `float()` or `int()`. `json.dumps(allow_nan=False)` raises on a stray `np.float32`, verified.
 - No API key in a command line, log, error message, test fixture, or commit.
-- No copyrighted audio in the repository. Tests use synthetic audio generated with ffmpeg.
+- No copyrighted audio in the repository. Tests use synthetic audio.
 - Nothing in this plan makes a network call. `facts` is an offline command.
 - No em dashes or en dashes in any file this plan creates, including code comments and commit messages.
+
+## The bar this plan is measured against
+
+Five axes, each scored against ground truth established outside this pipeline:
+
+| Axis | Known | Gate |
+|---|---|---|
+| `tempo_bpm` | 80.7 | within 5 percent |
+| `key` | F# minor | exact |
+| `tuning` | drop C# | exact |
+| `intro_seconds` | 12.1 | within 3 s |
+| `lra_lu` | 4.1 | within 1.5 LU |
+
+Two axes the original bar named are deliberately **not** on it, each for a stated reason:
+
+**`section_count`.** Sixteen segmentation methods were run at one fixed configuration declared before comparing against the answer key. None generalises across the three tracks. The best candidate returns 7, 6 and 10, matches only 4 of 6 known boundaries, and was selected by noticing which row of a table hit 7, which is selection on the one track that has an answer. It self-assessed at 50 percent confidence on a fresh track. The axis is graded `UNKNOWN` and the sheet emits boundaries without claiming a count. Evidence: `SECTIONS-research.md`.
+
+**`low_end_share`.** The figure 16.4 percent could not be reproduced by any of eight readings of "share of spectral energy below 150 Hz", which span 10.83 to 58.01 depending on magnitude against power, global against per frame, and crossover. Rather than pick the reading that lands inside the gate, which would be choosing a definition to manufacture a pass, the definition is pinned and both sides are measured with it. The reference becomes this pipeline's own measurement of the reference track. Evidence: `MEASUREMENT-DECISIONS.md`.
+
+Both of those, plus `lead_register_midi`, still matter at the **exit bar**, where a generated track is scored against this pipeline's own measurement of the reference. That is the parent spec's own rule, that both sides be measured the same way, and it is the only place a figure this pipeline cannot reproduce has no role.
 
 ## File Structure
 
@@ -30,11 +60,11 @@
 | `scripts/facts.py` (create) | The `Fact` constructor and its validation, stem adoption, sheet assembly, the projection onto compare's axes, markdown rendering. Knows nothing about the CLI. |
 | `scripts/chords.py` (create) | Band limiting, key estimate, chord sequence, harmonic rhythm, tuning estimate. Pure measurement over arrays. |
 | `scripts/compare.py` (modify) | One new axis, `tuning`. |
-| `scripts/deconstruct.py` (modify) | The `facts` command. Orchestration only. |
+| `scripts/deconstruct.py` (modify) | The `facts` command. |
 | `scripts/corpus_check.py` (create) | Runs the corpus, reruns it, diffs. |
-| `tests/test_facts.py` (create) | Fact validation, stem adoption, projection, rerun stability on synthetic audio. |
-| `tests/test_chords.py` (create) | Band limiting, key on synthetic chords, tuning templates. |
-| `tests/test_compare.py` (modify) | The tuning axis. |
+| `tests/test_facts.py` (create) | Fact validation, stem adoption, projection, rerun stability. |
+| `tests/test_chords.py` (create) | Band limiting, key, chords, tuning. |
+| `tests/test_compare.py` (modify) | The tuning axis, and the four count assertions it moves. |
 
 ---
 
@@ -108,10 +138,22 @@ class FactShapeTests(unittest.TestCase):
             with self.assertRaises(f.FactError):
                 self.good(value=bad)
 
+    def test_a_numpy_scalar_is_coerced_so_json_can_serialise_it(self):
+        import json
+        import numpy as np
+        result = self.good(value=np.float32(80.7))
+        self.assertIsInstance(result['value'], float)
+        json.dumps(result, allow_nan=False)
+
 
 if __name__ == '__main__':
     unittest.main()
 ```
+
+The last test exists because `json.dumps(..., allow_nan=False)` raises
+`TypeError` on `np.float32` while accepting `np.float64`, so a single forgotten
+`float()` in one axis builder crashes the whole command at write time. Coercing
+in one place is cheaper than remembering fourteen times.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -120,7 +162,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'facts'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `scripts/facts.py` with this at the top:
+Create `scripts/facts.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -141,6 +183,32 @@ class FactError(Exception):
     pass
 
 
+def _plain(value):
+    """A JSON-safe copy of value, with numpy scalars coerced.
+
+    json.dumps(allow_nan=False) accepts np.float64 and raises TypeError on
+    np.float32, so an axis that forgets one float() crashes the command at
+    write time rather than where the mistake was made. Coercing once here
+    costs nothing and removes fourteen chances to forget.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if hasattr(value, 'item') and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (AttributeError, ValueError):
+            return value
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, int):
+        return int(value)
+    return value
+
+
 def _finite(value):
     """True when value is a real measurement rather than a placeholder.
 
@@ -151,6 +219,10 @@ def _finite(value):
         return False
     if isinstance(value, (int, float)):
         return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite(v) for v in value)
     return True
 
 
@@ -165,12 +237,13 @@ def fact(value, unit, stem, method, confidence, suno_actionable,
         raise FactError('method must be a non-empty list of method names')
     if value is None and confidence != 'UNKNOWN':
         raise FactError('a fact with no value must be graded UNKNOWN')
+    value = _plain(value)
     if value is not None and not _finite(value):
         raise FactError(f'{value!r} is not a measurement')
     if band_hz is not None:
         if not isinstance(band_hz, (list, tuple)) or len(band_hz) != 2:
             raise FactError('band_hz must be a [low, high] pair or None')
-        band_hz = [band_hz[0], band_hz[1]]
+        band_hz = [_plain(band_hz[0]), _plain(band_hz[1])]
     return {'value': value, 'unit': unit, 'stem': stem, 'band_hz': band_hz,
             'method': list(method), 'confidence': confidence,
             'suno_actionable': suno_actionable, 'note': note}
@@ -179,7 +252,7 @@ def fact(value, unit, stem, method, confidence, suno_actionable,
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 8 tests
+Expected: PASS, 9 tests
 
 - [ ] **Step 5: Commit**
 
@@ -197,12 +270,13 @@ git commit -m "feat: a fact that cannot state its method refuses to exist"
 - Modify: `tests/test_facts.py`
 
 **Interfaces:**
-- Consumes: `stems.STEM_NAMES` from the merged phase 1 work.
+- Consumes: `stems.STEM_NAMES`.
 - Produces: `adopt_stems(folder) -> dict[str, Path]`, `StemAdoptionError`.
 
 Why this exists: the two supplied corpus stem sets are named
 `1_<title>_(Drums).wav`, which is not demucs output. Without adoption the corpus
-is one track.
+is one track, and a pipeline validated on one track proves only that it was
+tuned to that track.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -222,9 +296,12 @@ class StemAdoptionTests(unittest.TestCase):
         for name in names:
             (self.dir / name).write_bytes(b'RIFF0000WAVEfake')
 
+    def _six(self, template='1_Some Track_({}).wav'):
+        return [template.format(n.title()) for n in
+                ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')]
+
     def test_adopts_a_supplied_six_stem_folder(self):
-        self._write([f'1_Some Track_({n.title()}).wav'
-                     for n in ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')])
+        self._write(self._six())
         result = f.adopt_stems(self.dir)
         self.assertEqual(set(result), {'drums', 'bass', 'guitar',
                                        'piano', 'vocals', 'other'})
@@ -236,6 +313,10 @@ class StemAdoptionTests(unittest.TestCase):
         self.assertEqual(set(f.adopt_stems(self.dir)),
                          {'drums', 'bass', 'guitar', 'piano', 'vocals', 'other'})
 
+    def test_the_source_mix_sitting_beside_the_stems_is_ignored(self):
+        self._write(self._six() + ['Some Track (Official Visualizer).mp3'])
+        self.assertEqual(len(f.adopt_stems(self.dir)), 6)
+
     def test_a_partial_folder_is_an_error_not_a_partial_sheet(self):
         self._write(['1_x_(Drums).wav', '1_x_(Bass).wav'])
         with self.assertRaises(f.StemAdoptionError) as caught:
@@ -243,20 +324,42 @@ class StemAdoptionTests(unittest.TestCase):
         for missing in ('guitar', 'piano', 'vocals', 'other'):
             self.assertIn(missing, str(caught.exception))
 
-    def test_two_files_claiming_one_stem_is_an_error_not_a_coin_toss(self):
-        self._write([f'1_x_({n.title()}).wav' for n in
+    def test_two_files_using_the_same_tagged_form_is_an_error(self):
+        self._write(self._six())
+        self._write(['2_Some Track_(Drums).wav'])
+        with self.assertRaises(f.StemAdoptionError) as caught:
+            f.adopt_stems(self.dir)
+        self.assertIn('drums', str(caught.exception))
+
+    def test_a_tagged_name_beats_a_loose_one_rather_than_being_ambiguous(self):
+        # Deliberate: (Drums) is a more specific claim than a filename that
+        # merely contains the word. Preferring it is the whole reason the
+        # tagged pass runs first, and treating this as ambiguous would reject
+        # a folder that is not actually ambiguous.
+        self._write(self._six() + ['drums_scratch_take.wav'])
+        result = f.adopt_stems(self.dir)
+        self.assertTrue(result['drums'].name.endswith('(Drums).wav'))
+
+    def test_two_untagged_files_claiming_one_stem_is_an_error(self):
+        self._write([f'{n}.wav' for n in
                      ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')])
-        (self.dir / 'drums_alt.wav').write_bytes(b'RIFF0000WAVEfake')
+        self._write(['drums take two.wav'])
         with self.assertRaises(f.StemAdoptionError) as caught:
             f.adopt_stems(self.dir)
         self.assertIn('drums', str(caught.exception))
 
     def test_other_does_not_swallow_a_filename_containing_the_word(self):
-        self._write([f'1_Another Brother_({n.title()}).wav' for n in
-                     ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other')])
+        self._write(self._six('1_Another Brother_({}).wav'))
         result = f.adopt_stems(self.dir)
         self.assertTrue(result['other'].name.endswith('(Other).wav'))
 ```
+
+Revision note. Revision 1 asserted that a stray `drums_alt.wav` beside a tagged
+`(Drums)` file must raise. The critic proved that test fails against the
+implementation, and on inspection the test was the thing that was wrong: a
+parenthesised tag is a more specific claim than a filename that happens to
+contain the word, and preferring it is exactly why the tagged pass runs first.
+The two tests above now say that plainly, one for each pass.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -265,17 +368,15 @@ Expected: FAIL, `AttributeError: module 'facts' has no attribute 'adopt_stems'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add to `scripts/facts.py`. Note the ordering: the parenthesised form is tried
-first across the whole folder, and only if no file uses it does the bare-token
-form run. `Another Brother_(Other).wav` contains the token `other` twice, so a
-single-pass substring match would see two candidates and refuse a folder that is
-in fact complete.
+Add to `scripts/facts.py`:
 
 ```python
 import re
 from pathlib import Path
 
 import stems
+
+AUDIO_SUFFIXES = ('.wav', '.flac', '.mp3', '.aif', '.aiff')
 
 
 class StemAdoptionError(Exception):
@@ -288,40 +389,56 @@ def _match(names, pattern):
 
 
 def adopt_stems(folder):
-    """Resolve an existing folder of six stems, however its files are named."""
+    """Resolve an existing folder of six stems, however its files are named.
+
+    Two passes, tagged first. A name carrying `(Drums)` is claiming to be the
+    drums stem; a name that merely contains the word might be the source mix,
+    a scratch take, or a track called Another Brother. When every stem
+    resolves through the tagged form, the loose form never runs, which is what
+    keeps `Another Brother_(Other).wav` from reading as two claims on `other`.
+    """
     folder = Path(folder)
     if not folder.is_dir():
         raise StemAdoptionError(f'Not a folder: {folder}')
     audio = [p for p in sorted(folder.iterdir())
-             if p.suffix.lower() in ('.wav', '.flac', '.mp3')]
+             if p.suffix.lower() in AUDIO_SUFFIXES]
     if not audio:
         raise StemAdoptionError(f'No audio files in {folder}')
 
-    parenthesised = _match(audio, lambda n, low: f'({n})' in low)
-    if all(len(v) == 1 for v in parenthesised.values()):
-        found = parenthesised
+    tagged = _match(audio, lambda n, low: f'({n})' in low)
+    if any(tagged.values()):
+        found, pass_name = tagged, 'tagged'
     else:
         found = _match(audio, lambda n, low: re.search(rf'\b{n}\b', low) is not None)
+        pass_name = 'loose'
 
     missing = sorted(n for n, v in found.items() if not v)
     if missing:
         raise StemAdoptionError(
-            f'{folder} yields no stem for: {", ".join(missing)}. '
-            f'A six stem folder is required; a partial one would produce a '
-            f'partial fact sheet, which is worse than none.')
+            f'{folder} yields no stem for: {", ".join(missing)} (matched by '
+            f'{pass_name} name). A six stem folder is required; a partial one '
+            f'would produce a partial fact sheet, which is worse than none.')
     ambiguous = sorted(n for n, v in found.items() if len(v) > 1)
     if ambiguous:
+        detail = '; '.join(
+            f'{n}: ' + ', '.join(p.name for p in found[n]) for n in ambiguous)
         raise StemAdoptionError(
-            f'More than one file claims these stems in {folder}: '
-            f'{", ".join(ambiguous)}. Rename or remove the extras rather than '
-            f'letting the sheet pick one.')
+            f'More than one file claims these stems in {folder}: {detail}. '
+            f'Rename or move the extras rather than letting the sheet pick one.')
     return {n: v[0] for n, v in found.items()}
 ```
+
+The `if any(tagged.values())` guard is the fix for the critic's B10a. Revision 1
+required the tagged pass to be *complete* before using it, which meant one extra
+untagged file could silently demote the whole folder to loose matching. Now the
+tagged pass owns the folder as soon as any file uses that form, and an
+incomplete tagged set reports which stems are missing rather than falling
+through to a looser rule that would guess.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 13 tests
+Expected: PASS, 17 tests
 
 - [ ] **Step 5: Prove it against the real corpus folders**
 
@@ -334,7 +451,9 @@ for d in ('$HOME/Desktop/mydaiarytoyou!/Wrong Turn',
     print(d, sorted(facts.adopt_stems(d)))
 "
 ```
-Expected: both print all six stem names. Paste the output into the pull request.
+Expected: both print all six stem names. The critic verified this already
+resolves cleanly on both real folders, including past the source mp3 sitting
+beside the stems. Paste the output into the pull request.
 
 - [ ] **Step 6: Commit**
 
@@ -353,10 +472,12 @@ git commit -m "feat: adopt an existing six stem folder whatever its naming"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `band_limit(y, sr, low, high) -> np.ndarray`, `key_estimate(y_list, sr) -> dict` with keys `key`, `scores`, `margin`, `tuning_estimate(y, sr) -> dict` with keys `tuning`, `lowest_hz`, `margin_cents`, `TUNINGS`.
+- Produces: `band_limit(y, sr, low, high) -> np.ndarray`, `key_estimate(signals, sr, low=150, high=2500) -> dict` with keys `key`, `scores`, `margin`, `tuning_estimate(y, sr) -> dict` with keys `tuning`, `lowest_hz`, `support`, `margin_cents`, and `TUNINGS`, `SUPPORT_FLOOR`.
 
 `key_estimate` takes a list of signals so the guitar and bass stems are summed
 before analysis rather than analysed separately and argued about afterwards.
+The critic verified this is load-bearing: the summed pair names F# minor with a
+margin of 0.1429, while the guitar alone names C# minor.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -376,18 +497,29 @@ import chords as c
 SR = 22050
 
 
-def tone(freq, seconds=1.0, sr=SR):
+def tone(freq, seconds=1.0, sr=SR, harmonics=True):
+    """A note, not a sine. Templates key off harmonic content."""
     t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
-    return np.sin(2 * np.pi * freq * t).astype(np.float32)
+    y = np.sin(2 * np.pi * freq * t)
+    if harmonics:
+        y = y + 0.5 * np.sin(2 * np.pi * 2 * freq * t) \
+              + 0.25 * np.sin(2 * np.pi * 3 * freq * t)
+    return y.astype(np.float32)
 
 
-def chord(freqs, seconds=1.0):
-    return sum(tone(f, seconds) for f in freqs) / len(freqs)
+def chord(freqs, seconds=1.0, harmonics=True):
+    return sum(tone(f, seconds, harmonics=harmonics) for f in freqs) / len(freqs)
+
+
+FS_MINOR = (185.0, 220.0, 277.2)
+CS_MINOR = (138.6, 174.6, 207.7)
+D_MAJOR = (146.8, 185.0, 220.0)
+A_MAJOR = (220.0, 277.2, 329.6)
 
 
 class BandLimitTests(unittest.TestCase):
     def test_it_removes_energy_outside_the_band(self):
-        y = tone(60) + tone(1000)
+        y = tone(60, harmonics=False) + tone(1000, harmonics=False)
         out = c.band_limit(y, SR, 150, 2500)
         spectrum = np.abs(np.fft.rfft(out))
         freqs = np.fft.rfftfreq(len(out), 1 / SR)
@@ -396,60 +528,93 @@ class BandLimitTests(unittest.TestCase):
         self.assertLess(low, keep * 0.1)
 
     def test_it_keeps_energy_inside_the_band(self):
-        y = tone(1000)
+        y = tone(1000, harmonics=False)
         out = c.band_limit(y, SR, 150, 2500)
         self.assertGreater(np.abs(out).max(), 0.3 * np.abs(y).max())
 
     def test_a_band_wider_than_nyquist_is_clamped_not_an_error(self):
-        out = c.band_limit(tone(1000), SR, 20, 40000)
-        self.assertEqual(len(out), len(tone(1000)))
+        y = tone(1000, harmonics=False)
+        self.assertEqual(len(c.band_limit(y, SR, 20, 40000)), len(y))
 
 
 class KeyTests(unittest.TestCase):
-    def test_it_names_the_key_of_a_synthetic_minor_progression(self):
-        # F# minor: F#m, A, E, B built from their triads.
-        progression = [(185.0, 220.0, 277.2), (220.0, 277.2, 329.6),
-                       (164.8, 207.7, 246.9), (246.9, 311.1, 370.0)]
-        y = np.concatenate([chord(f, 2.0) for f in progression] * 2)
+    def test_it_names_the_key_of_a_tonic_weighted_minor_loop(self):
+        # F#m held twice as long as the others, which is what gives a minor
+        # key its tonic. An equal-duration F#m A E B loop contains exactly the
+        # E major scale with equal weight and correctly reads as E major; the
+        # critic proved that, and the fixture was wrong, not the estimator.
+        progression = [(FS_MINOR, 4.0), (D_MAJOR, 2.0),
+                       (FS_MINOR, 4.0), (CS_MINOR, 2.0)]
+        y = np.concatenate([chord(f, s) for f, s in progression] * 2)
         result = c.key_estimate([y], SR)
         self.assertEqual(result['key'], 'F# minor')
+        self.assertGreater(result['margin'], 0.05)
 
     def test_it_reports_a_margin_between_the_first_two_candidates(self):
-        y = np.concatenate([chord((220.0, 261.6, 329.6), 2.0)] * 4)
+        y = np.concatenate([chord(A_MAJOR, 2.0)] * 4)
         result = c.key_estimate([y], SR)
         self.assertGreaterEqual(result['margin'], 0.0)
         self.assertGreaterEqual(len(result['scores']), 3)
 
     def test_silence_has_no_key_rather_than_a_default_one(self):
-        result = c.key_estimate([np.zeros(SR, dtype=np.float32)], SR)
-        self.assertIsNone(result['key'])
+        self.assertIsNone(c.key_estimate([np.zeros(SR, dtype=np.float32)],
+                                         SR)['key'])
 
     def test_two_stems_are_summed_not_analysed_separately(self):
-        a = np.concatenate([chord((185.0, 220.0, 277.2), 2.0)] * 4)
-        b = np.concatenate([tone(92.5, 2.0)] * 4)
-        result = c.key_estimate([a, b], SR)
-        self.assertIsNotNone(result['key'])
+        a = np.concatenate([chord(FS_MINOR, 4.0), chord(D_MAJOR, 2.0)] * 3)
+        b = np.concatenate([tone(92.5, 4.0), tone(73.4, 2.0)] * 3)
+        self.assertIsNotNone(c.key_estimate([a, b], SR)['key'])
 
 
 class TuningTests(unittest.TestCase):
-    def test_it_names_drop_c_sharp_from_its_lowest_fundamental(self):
-        y = np.concatenate([tone(34.65, 3.0), tone(69.3, 3.0)])
-        result = c.tuning_estimate(y, SR)
-        self.assertEqual(result['tuning'], 'drop C#')
+    """Tuning is the lowest SUSTAINED semitone, not the lowest sample.
 
-    def test_it_names_standard_e_from_its_lowest_fundamental(self):
-        y = np.concatenate([tone(41.2, 3.0), tone(82.4, 3.0)])
+    Revision 1 took the 10th percentile of the pitch track and returned
+    `drop D` on the real bass stem, with a margin of 0.9 cents, which reads as
+    near certain and is wrong. The histogram showed why: C#1 holds 6.3 percent
+    of frames and D1 holds 29.0, so the 10th percentile lands inside D1.
+    """
+
+    def _held(self, freqs_and_weights, seconds=0.5):
+        parts = []
+        for freq, repeats in freqs_and_weights:
+            parts.extend([tone(freq, seconds, harmonics=False)] * repeats)
+        return np.concatenate(parts)
+
+    def test_it_names_drop_c_sharp_from_its_lowest_sustained_semitone(self):
+        y = self._held([(34.65, 6), (36.71, 20), (46.25, 14)])
+        self.assertEqual(c.tuning_estimate(y, SR)['tuning'], 'drop C#')
+
+    def test_a_brief_lower_transient_does_not_become_the_tuning(self):
+        # One frame of A0 against many of C#1. A kick drum is not a string.
+        y = self._held([(27.50, 1), (34.65, 20), (46.25, 14)])
+        self.assertEqual(c.tuning_estimate(y, SR)['tuning'], 'drop C#')
+
+    def test_it_names_standard_e_from_its_lowest_sustained_semitone(self):
+        y = self._held([(41.20, 12), (61.74, 12)])
         self.assertEqual(c.tuning_estimate(y, SR)['tuning'], 'standard E')
 
     def test_it_distinguishes_neighbouring_tunings_a_semitone_apart(self):
-        drop_d = c.tuning_estimate(np.concatenate([tone(36.71, 3.0)]), SR)
-        drop_c = c.tuning_estimate(np.concatenate([tone(32.70, 3.0)]), SR)
-        self.assertEqual(drop_d['tuning'], 'drop D')
-        self.assertEqual(drop_c['tuning'], 'drop C')
+        self.assertEqual(
+            c.tuning_estimate(self._held([(36.71, 16)]), SR)['tuning'], 'drop D')
+        self.assertEqual(
+            c.tuning_estimate(self._held([(32.70, 16)]), SR)['tuning'], 'drop C')
+
+    def test_the_table_holds_no_two_tunings_closer_than_a_semitone(self):
+        import math
+        values = sorted(c.TUNINGS.values())
+        for a, b in zip(values, values[1:]):
+            self.assertGreater(abs(1200 * math.log2(b / a)), 50.0,
+                               f'{a} and {b} are closer than a semitone apart')
 
     def test_no_sustained_low_fundamental_yields_no_tuning(self):
         result = c.tuning_estimate(np.zeros(SR * 2, dtype=np.float32), SR)
         self.assertIsNone(result['tuning'])
+
+    def test_it_reports_the_support_that_earned_the_answer(self):
+        y = self._held([(34.65, 6), (36.71, 20)])
+        self.assertGreaterEqual(c.tuning_estimate(y, SR)['support'],
+                                c.SUPPORT_FLOOR)
 
 
 if __name__ == '__main__':
@@ -463,9 +628,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'chords'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `scripts/chords.py`. The tuning table is the load-bearing part: each entry
-is the frequency of the lowest string, and the match is on cents distance so a
-neighbouring tuning a semitone away cannot win by rounding.
+Create `scripts/chords.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -491,17 +654,35 @@ KRUMHANSL_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09,
 KRUMHANSL_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
                             2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-# Lowest string fundamental, in Hz, for each tuning the corpus might use.
+# Lowest string fundamental an octave down, because this table reads the BASS
+# stem, and in this material the bass doubles the lowest guitar string an
+# octave below it. drop C# on a guitar is C#2 at 69.30 Hz; the entry below is
+# C#1 at 34.65 Hz, which is what the bass actually plays.
+#
+# The guitar stem cannot be used for this. Its low band yin output is dominated
+# by octave errors: on the reference track its strongest bin is F#1 at 17.0
+# percent of frames, an octave below the musically real F#2. Revision 1 graded
+# tuning KNOW when both stems agreed, and both stems agreed on the wrong answer.
+#
+# D standard is deliberately absent. Its lowest string is D, the same pitch as
+# drop D's, so no measurement of a lowest fundamental can separate them, and
+# revision 1's entry for it evaluated to 0.024 cents from standard E.
 TUNINGS = {
-    'standard E': 82.41 / 2,
-    'Eb standard': 77.78 / 2,
-    'drop D': 73.42 / 2,
-    'D standard': 73.42 / 2 * 2 ** (2 / 12),
-    'drop C#': 69.30 / 2,
-    'drop C': 65.41 / 2,
-    'drop B': 61.74 / 2,
-    'drop A#': 58.27 / 2,
+    'standard E': 41.20,
+    'Eb standard': 38.89,
+    'drop D': 36.71,
+    'drop C#': 34.65,
+    'drop C': 32.70,
+    'drop B': 30.87,
+    'drop A#': 29.14,
 }
+# A semitone bin must hold this share of voiced frames to count as a played
+# string rather than noise. Set by the gap in the reference bass histogram:
+# A0 holds 0.70 percent and C#1 holds 6.30, a factor of nine, and 0.02, 0.03
+# and 0.05 were all checked and all return C#1. A constant with a nine times
+# margin on either side is not a constant fitted to one track.
+SUPPORT_FLOOR = 0.02
+MAX_CENTS = 60.0
 SILENCE = 1e-6
 
 
@@ -512,8 +693,20 @@ def band_limit(y, sr, low, high):
     high = min(float(high), nyquist * 0.99)
     if low >= high:
         return np.asarray(y, dtype=np.float32)
-    sos = signal.butter(4, [low / nyquist, high / nyquist], btype='band', output='sos')
+    sos = signal.butter(4, [low / nyquist, high / nyquist], btype='band',
+                        output='sos')
     return signal.sosfilt(sos, np.asarray(y, dtype=np.float64)).astype(np.float32)
+
+
+def _summed(signals):
+    stacked = [np.asarray(s, dtype=np.float32) for s in signals if s is not None]
+    if not stacked:
+        return None
+    length = max(len(s) for s in stacked)
+    out = np.zeros(length, dtype=np.float32)
+    for s in stacked:
+        out[:len(s)] += s
+    return out
 
 
 def key_estimate(signals, sr, low=150, high=2500):
@@ -523,13 +716,9 @@ def key_estimate(signals, sr, low=150, high=2500):
     other systems will not fit them, which is why the margin travels with the
     answer instead of being discarded.
     """
-    stacked = [np.asarray(s, dtype=np.float32) for s in signals if s is not None]
-    if not stacked:
+    summed = _summed(signals)
+    if summed is None:
         return {'key': None, 'scores': [], 'margin': 0.0}
-    length = max(len(s) for s in stacked)
-    summed = np.zeros(length, dtype=np.float32)
-    for s in stacked:
-        summed[:len(s)] += s
     y = band_limit(summed, sr, low, high)
     if np.max(np.abs(y)) < SILENCE:
         return {'key': None, 'scores': [], 'margin': 0.0}
@@ -539,7 +728,8 @@ def key_estimate(signals, sr, low=150, high=2500):
         return {'key': None, 'scores': [], 'margin': 0.0}
     scored = []
     for i, note in enumerate(NOTES):
-        for label, profile in (('major', KRUMHANSL_MAJOR), ('minor', KRUMHANSL_MINOR)):
+        for label, profile in (('major', KRUMHANSL_MAJOR),
+                               ('minor', KRUMHANSL_MINOR)):
             value = float(np.corrcoef(avg, np.roll(profile, i))[0, 1])
             if math.isfinite(value):
                 scored.append((value, f'{note} {label}'))
@@ -552,53 +742,75 @@ def key_estimate(signals, sr, low=150, high=2500):
             'margin': round(float(margin), 4)}
 
 
-def tuning_estimate(y, sr, high=200.0):
-    """Name the tuning from the lowest sustained fundamental.
+def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
+    """Name the tuning from the lowest SUSTAINED semitone in the bass.
 
-    Sustained is the point. A single low transient is a kick drum bleeding
-    through, not a string, so the estimate reads the median of the per frame
-    minimum fundamental rather than the outright lowest sample.
+    Sustained is the whole point. A single low transient is a kick drum
+    bleeding through, not a string, so the estimate bins the pitch track to
+    semitones and takes the lowest bin that holds at least `floor` of the
+    voiced frames.
     """
     y = np.asarray(y, dtype=np.float32)
+    empty = {'tuning': None, 'lowest_hz': None, 'support': None,
+             'margin_cents': None}
     if len(y) == 0 or np.max(np.abs(y)) < SILENCE:
-        return {'tuning': None, 'lowest_hz': None, 'margin_cents': None}
+        return empty
     low = band_limit(y, sr, 25.0, high)
     f0 = librosa.yin(low.astype(np.float64), fmin=25.0, fmax=high, sr=sr,
                      frame_length=4096)
     f0 = f0[np.isfinite(f0)]
     f0 = f0[(f0 > 25.0) & (f0 < high)]
-    if len(f0) < 8:
-        return {'tuning': None, 'lowest_hz': None, 'margin_cents': None}
-    lowest = float(np.percentile(f0, 10))
+    if len(f0) < 32:
+        return empty
+    bins = np.round(librosa.hz_to_midi(f0)).astype(int)
+    values, counts = np.unique(bins, return_counts=True)
+    share = counts / counts.sum()
+    supported = values[share >= floor]
+    if not len(supported):
+        return empty
+    lowest_midi = int(supported.min())
+    support = float(share[values == lowest_midi][0])
+    lowest = float(librosa.midi_to_hz(lowest_midi))
     ranked = sorted(
         (abs(1200 * math.log2(lowest / hz)), name) for name, hz in TUNINGS.items())
     best_cents, best_name = ranked[0]
-    if best_cents > 60.0:
+    if best_cents > MAX_CENTS:
         return {'tuning': None, 'lowest_hz': round(lowest, 2),
+                'support': round(support, 4),
                 'margin_cents': round(best_cents, 1)}
     return {'tuning': best_name, 'lowest_hz': round(lowest, 2),
-            'margin_cents': round(best_cents, 1)}
+            'support': round(support, 4), 'margin_cents': round(best_cents, 1)}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_chords -v`
-Expected: PASS, 11 tests
+Expected: PASS, 14 tests
 
-If `key_estimate` names the relative major instead of `F# minor`, do not loosen
-the assertion. `chroma_cqt` over pure sine triads has no timbre to lean on, so
-the fix is to build the fixture from triads with a second harmonic added, which
-is what a real instrument supplies. Change the fixture, keep the assertion.
+- [ ] **Step 5: Prove both estimators on the real reference stems**
 
-If `scipy` is missing, add `scipy>=1.11` to `requirements.txt` and install it
-into the main checkout's venv. librosa already depends on it, so this should be
-a no-op.
+```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+D="$HOME/.config/deconstruct-audio/cache/stems/3b1f4c21c62edd82/htdemucs_6s/mydiarytoyou! - Murder, She Wrote (Official Visualizer)"
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'scripts')
+import librosa, chords
+g,_ = librosa.load('$D/guitar.wav', sr=22050, mono=True)
+b,_ = librosa.load('$D/bass.wav',   sr=22050, mono=True)
+print('key   ', chords.key_estimate([g, b], 22050))
+print('tuning', chords.tuning_estimate(b, 22050))
+"
+```
+Expected, both already verified this session:
+`key` names `F# minor` with a margin near 0.1429, and `tuning` names `drop C#`
+with `lowest_hz` 34.65 and `support` near 0.063. Paste both into the pull
+request. These are two of the five entry bar axes.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/chords.py tests/test_chords.py
-git commit -m "feat: band limited key and tuning estimates"
+git commit -m "feat: key from summed stems, tuning from the lowest sustained semitone"
 ```
 
 ---
@@ -610,8 +822,8 @@ git commit -m "feat: band limited key and tuning estimates"
 - Modify: `tests/test_chords.py`
 
 **Interfaces:**
-- Consumes: `band_limit` from Task 3.
-- Produces: `chord_sequence(signals, sr, beat_times, bars_per_chord=1) -> list[dict]` where each entry is `{'start_s', 'end_s', 'root', 'quality', 'strength', 'third_present'}` with `quality` in `('major', 'minor', 'power')`, and `harmonic_rhythm(sequence) -> dict` with keys `chords_per_bar`, `median_chord_bars`, `label`.
+- Consumes: `band_limit`, `_summed` from Task 3.
+- Produces: `chord_sequence(signals, sr, beat_times, bars_per_chord=1, low=150, high=2500) -> list[dict]` where each entry is `{'start_s', 'end_s', 'root', 'quality', 'strength', 'third_present', 'fifth_present'}` with `quality` in `('major', 'minor', 'power')`, and `harmonic_rhythm(sequence) -> dict` with keys `chords_per_bar`, `median_chord_bars`, `label`.
 
 `quality` is `'power'` when the third is not present. That is not a fallback, it
 is the measurement: most distorted guitar is genuinely ambiguous between major
@@ -642,24 +854,42 @@ class ChordSequenceTests(unittest.TestCase):
         self.assertEqual(seq[0]['quality'], 'power')
         self.assertFalse(seq[0]['third_present'])
 
-    def test_a_held_chord_reports_a_slow_harmonic_rhythm(self):
+    def test_a_held_chord_reports_a_static_harmonic_rhythm(self):
         y = chord((220.0, 261.6, 329.6), 8.0)
         seq = c.chord_sequence([y], SR, self._beats(16))
-        rhythm = c.harmonic_rhythm(seq)
-        self.assertEqual(rhythm['label'], 'static')
+        self.assertEqual(c.harmonic_rhythm(seq)['label'], 'static')
 
-    def test_a_chord_per_bar_reports_a_moderate_harmonic_rhythm(self):
+    def test_a_chord_per_bar_reports_a_fast_harmonic_rhythm(self):
         y = np.concatenate([chord((220.0, 261.6, 329.6), 2.0),
                             chord((246.9, 293.7, 370.0), 2.0),
                             chord((164.8, 207.7, 246.9), 2.0),
                             chord((185.0, 220.0, 277.2), 2.0)])
         seq = c.chord_sequence([y], SR, self._beats(16))
-        rhythm = c.harmonic_rhythm(seq)
-        self.assertIn(rhythm['label'], ('moderate', 'fast'))
         self.assertGreater(len(seq), 1)
+        self.assertEqual(c.harmonic_rhythm(seq)['label'], 'fast')
+
+    def test_every_label_is_reachable(self):
+        # Revision 1 had four labels and 'fast' could never fire, because a run
+        # length is an integer of at least 1 so the median was always at least
+        # 1 and the 'moderate' branch always won first. Three labels, each with
+        # a run length that produces it.
+        def seq(runs):
+            out, tick = [], 0
+            for index, length in enumerate(runs):
+                for _ in range(length):
+                    out.append({'start_s': float(tick), 'end_s': float(tick + 1),
+                                'root': c.NOTES[index % 12], 'quality': 'power',
+                                'strength': 0.3, 'third_present': False,
+                                'fifth_present': True})
+                    tick += 1
+            return out
+        self.assertEqual(c.harmonic_rhythm(seq([1, 1, 1, 1]))['label'], 'fast')
+        self.assertEqual(c.harmonic_rhythm(seq([2, 2, 2]))['label'], 'slow')
+        self.assertEqual(c.harmonic_rhythm(seq([4, 4]))['label'], 'static')
 
     def test_no_beats_yields_no_sequence_rather_than_a_guess(self):
-        self.assertEqual(c.chord_sequence([tone(220.0, 2.0)], SR, np.array([])), [])
+        self.assertEqual(c.chord_sequence([tone(220.0, 2.0)], SR,
+                                          np.array([])), [])
 
     def test_harmonic_rhythm_of_an_empty_sequence_is_unknown(self):
         self.assertIsNone(c.harmonic_rhythm([])['label'])
@@ -677,13 +907,14 @@ Append to `scripts/chords.py`:
 ```python
 THIRD_RATIO = 0.55   # a third must reach this share of the root's chroma to count
 FIFTH_RATIO = 0.35
+BEATS_PER_BAR = 4
 
 
-def _bar_windows(beat_times, beats_per_bar=4, bars_per_chord=1):
+def _bar_windows(beat_times, beats_per_bar=BEATS_PER_BAR, bars_per_chord=1):
     beat_times = np.asarray(beat_times, dtype=float)
-    step = beats_per_bar * bars_per_chord
     if len(beat_times) < 2:
         return []
+    step = beats_per_bar * bars_per_chord
     edges = list(beat_times[::step])
     if edges[-1] < beat_times[-1]:
         edges.append(float(beat_times[-1]))
@@ -697,13 +928,9 @@ def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
     windows = _bar_windows(beat_times, bars_per_chord=bars_per_chord)
     if not windows:
         return []
-    stacked = [np.asarray(s, dtype=np.float32) for s in signals if s is not None]
-    if not stacked:
+    summed = _summed(signals)
+    if summed is None:
         return []
-    length = max(len(s) for s in stacked)
-    summed = np.zeros(length, dtype=np.float32)
-    for s in stacked:
-        summed[:len(s)] += s
     y = band_limit(summed, sr, low, high)
     if np.max(np.abs(y)) < SILENCE:
         return []
@@ -742,28 +969,25 @@ def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
 
 
 def harmonic_rhythm(sequence):
-    """How often the chord actually changes, in bars."""
+    """How often the chord actually changes, in bars.
+
+    Three labels, not four. A run length is an integer of at least 1, so a
+    median below 1 is impossible and any label defined by that range can never
+    fire. Revision 1 had one.
+    """
     if not sequence:
         return {'chords_per_bar': None, 'median_chord_bars': None, 'label': None}
     runs, current = [], 1
     for previous, entry in zip(sequence, sequence[1:]):
-        same = (previous['root'] == entry['root']
-                and previous['quality'] == entry['quality'])
-        if same:
+        if (previous['root'] == entry['root']
+                and previous['quality'] == entry['quality']):
             current += 1
         else:
             runs.append(current)
             current = 1
     runs.append(current)
     median = float(np.median(runs))
-    if median >= 4:
-        label = 'static'
-    elif median >= 2:
-        label = 'slow'
-    elif median >= 1:
-        label = 'moderate'
-    else:
-        label = 'fast'
+    label = 'static' if median >= 4 else ('slow' if median >= 2 else 'fast')
     return {'chords_per_bar': round(1.0 / median, 3),
             'median_chord_bars': round(median, 2), 'label': label}
 ```
@@ -771,12 +995,14 @@ def harmonic_rhythm(sequence):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_chords -v`
-Expected: PASS, 17 tests
+Expected: PASS, 21 tests
 
-`THIRD_RATIO` at 0.55 is a starting value, not a measured one. If the synthetic
-triad tests fail, print the three ratios for the fixture chords and set the
-constant from what you see, then record the observed numbers in a comment beside
-it. Do not change the assertions.
+`THIRD_RATIO` at 0.55 is a starting value, not a measured one. If a synthetic
+triad test fails, print the three ratios for that fixture and set the constant
+from what you see, then record the observed numbers in a comment beside it. Do
+not change the assertions. Then check what your new value does to the real
+guitar plus bass pair and put that in the pull request, because a constant tuned
+on sine triads that has never seen a distorted guitar is a constant on probation.
 
 - [ ] **Step 5: Commit**
 
@@ -803,7 +1029,7 @@ The sheet's shape:
 {
   "schema": "deconstruct-audio/facts/1",
   "generated_at": "2026-09-17T00:00:00Z",
-  "source": {"path": "...", "sha256": "...", "duration_s": 138.8},
+  "source": {"path": "...", "sha256": "...", "duration_s": 138.786},
   "stems_from": "separated|adopted",
   "facts": {"tempo": {...}, "key": {...}}
 }
@@ -811,6 +1037,23 @@ The sheet's shape:
 
 `generated_at` is the only field allowed to differ between two runs on the same
 audio. That is what makes rerun stability testable.
+
+**Three interface facts a builder needs, each a defect the critic found in
+revision 1:**
+
+1. **Beat times have no source.** `chord_sequence` needs them. `tempo_family`
+   does not return them and neither does `measure.measure`, verified. So
+   `facts.py` owns `_beat_times`, and it seeds the beat tracker with the
+   already measured primary tempo rather than letting it choose a metrical
+   level again. The tempo family has already made that decision; a second
+   opinion here would silently override it, and the section specialist verified
+   librosa's unseeded tracker sits at different metrical levels across this
+   corpus, reporting 152 BPM on a track stated at about 103.
+2. **`band_limit` takes `sr`.** Revision 1 called `band_limit(guitar, 70, 1400)`,
+   which puts 70 where `sr` belongs and drops `high`. It is
+   `chords_mod.band_limit(guitar, sr, 70, 1400)`.
+3. **`_register` is a helper, not a builder.** Builders share one signature.
+   The two register axes are thin wrappers over it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -821,13 +1064,14 @@ import json
 import subprocess
 
 
-def synth_track(path, seconds=12):
-    """A click plus a sustained low tone. No copyrighted audio in the repo."""
+def synth_track(path, seconds=16):
+    """A click, a low drone and a mid tone. No copyrighted audio in the repo."""
     subprocess.run([
         'ffmpeg', '-v', 'error', '-y',
         '-f', 'lavfi', '-i', f'sine=frequency=110:duration={seconds}',
         '-f', 'lavfi', '-i', f'sine=frequency=440:duration={seconds}',
-        '-filter_complex', '[0][1]amix=inputs=2',
+        '-f', 'lavfi', '-i', f'anoisesrc=d={seconds}:c=pink:a=0.3',
+        '-filter_complex', '[0][1][2]amix=inputs=3',
         '-ar', '22050', '-ac', '1', str(path)], check=True)
 
 
@@ -841,11 +1085,13 @@ class SheetTests(unittest.TestCase):
         self.stems = self.dir / 'stems'
         self.stems.mkdir()
         for name in ('drums', 'bass', 'guitar', 'piano', 'vocals', 'other'):
-            target = self.stems / f'{name}.wav'
-            target.write_bytes(self.audio.read_bytes())
+            (self.stems / f'{name}.wav').write_bytes(self.audio.read_bytes())
+
+    def sheet(self):
+        return f.fact_sheet(self.audio, stems_dir=self.stems)
 
     def test_every_fact_carries_method_and_confidence(self):
-        sheet = f.fact_sheet(self.audio, stems_dir=self.stems)
+        sheet = self.sheet()
         self.assertTrue(sheet['facts'])
         for axis, entry in sheet['facts'].items():
             self.assertTrue(entry['method'], f'{axis} has no method')
@@ -853,40 +1099,59 @@ class SheetTests(unittest.TestCase):
             self.assertIn(entry['suno_actionable'], f.ACTIONABLE, axis)
 
     def test_the_sheet_names_its_schema_and_its_source(self):
-        sheet = f.fact_sheet(self.audio, stems_dir=self.stems)
+        sheet = self.sheet()
         self.assertEqual(sheet['schema'], f.SCHEMA)
         self.assertEqual(len(sheet['source']['sha256']), 64)
         self.assertEqual(sheet['stems_from'], 'adopted')
 
+    def test_the_whole_sheet_serialises_without_allow_nan(self):
+        json.dumps(self.sheet(), allow_nan=False)
+
     def test_two_runs_on_the_same_audio_agree_apart_from_the_timestamp(self):
-        first = f.fact_sheet(self.audio, stems_dir=self.stems)
-        second = f.fact_sheet(self.audio, stems_dir=self.stems)
+        first, second = self.sheet(), self.sheet()
         first.pop('generated_at')
         second.pop('generated_at')
         self.assertEqual(json.dumps(first, sort_keys=True),
                          json.dumps(second, sort_keys=True))
 
     def test_the_projection_uses_compare_s_own_axis_names(self):
-        sys.path.insert(0, str(ROOT / 'scripts'))
         import compare
-        sheet = f.fact_sheet(self.audio, stems_dir=self.stems)
-        projected = f.scorable(sheet)
+        projected = f.scorable(self.sheet())
         self.assertTrue(projected)
         for axis in projected:
             self.assertIn(axis, compare.GATES, f'{axis} is not a compare axis')
 
     def test_an_unknown_axis_is_left_out_of_the_projection_not_passed_as_null(self):
-        sheet = f.fact_sheet(self.audio, stems_dir=self.stems)
+        sheet = self.sheet()
         sheet['facts']['key'] = f.fact(None, 'name', 'guitar', ['chroma'],
                                        'UNKNOWN', 'direct')
         self.assertNotIn('key', f.scorable(sheet))
 
+    def test_section_count_is_unknown_and_says_why(self):
+        entry = self.sheet()['facts']['section_count']
+        self.assertEqual(entry['confidence'], 'UNKNOWN')
+        self.assertIsNone(entry['value'])
+        self.assertIn('generalise', entry['note'])
+
+    def test_section_boundaries_are_still_emitted(self):
+        entry = self.sheet()['facts']['section_boundaries']
+        self.assertEqual(entry['confidence'], 'INFER')
+        self.assertIsInstance(entry['value'], list)
+
+    def test_a_silent_stem_is_reported_absent_rather_than_failing(self):
+        import numpy as np
+        import soundfile as sf
+        y, sr = sf.read(self.stems / 'piano.wav')
+        sf.write(self.stems / 'piano.wav', np.zeros_like(y), sr)
+        entry = f.fact_sheet(self.audio, stems_dir=self.stems)['facts']['instrumentation']
+        self.assertEqual(entry['confidence'], 'KNOW')
+        self.assertFalse(entry['value']['piano']['active'])
+
     def test_the_markdown_names_every_axis_and_its_grade(self):
-        sheet = f.fact_sheet(self.audio, stems_dir=self.stems)
+        sheet = self.sheet()
         text = f.render_markdown(sheet)
         for axis in sheet['facts']:
             self.assertIn(axis, text)
-        self.assertIn('KNOW', text + 'KNOW')
 
     def test_a_partial_stem_folder_refuses_rather_than_emitting_a_partial_sheet(self):
         (self.stems / 'guitar.wav').unlink()
@@ -899,19 +1164,16 @@ class SheetTests(unittest.TestCase):
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
 Expected: FAIL, `AttributeError: module 'facts' has no attribute 'fact_sheet'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write the shared helpers**
 
-Append to `scripts/facts.py`. Every axis is one small function so a failure names
-the axis it came from, and every one of them returns a `fact()`, which is what
-makes the G2 gate structural rather than a review habit.
+Append to `scripts/facts.py`:
 
 ```python
 import datetime as _dt
 import hashlib
 
-import numpy as np
 import librosa
-import soundfile as sf
+import numpy as np
 
 import chords as chords_mod
 import measure as measure_mod
@@ -919,20 +1181,31 @@ import stems as stems_mod
 import tempo as tempo_mod
 
 SCHEMA = 'deconstruct-audio/facts/1'
+SR = 22050
 LOW_END_HZ = 150.0
 AIR_HZ = 5000.0
+N_FFT = 2048
+# A stem counts as present when its RMS is within this many dB of the loudest
+# stem. Relative, not absolute, so it does not move with mastering level. On
+# the reference track the loudest stem is bass at -19.07 dBFS and piano sits at
+# -58.29, which is 39 dB down and correctly reads absent: that track has no
+# piano. The other five span -19.07 to -41.61 and all read present.
+PRESENCE_DB = 30.0
+# Per second window threshold for the intro's arrangement density curve. The
+# intro rule below returns the same answer at -35, -40 and -45 on the reference
+# track, so this constant is not load bearing.
 ACTIVE_DB = -40.0
+INTRO_SNAP_S = 4.0
 
-PROJECTION = {
-    'tempo': ('tempo_bpm', lambda v: v),
-    'key': ('key', lambda v: v),
-    'tuning': ('tuning', lambda v: v),
-    'intro_seconds': ('intro_seconds', lambda v: v),
-    'sections': ('section_count', lambda v: v['count']),
-    'loudness': ('lra_lu', lambda v: v['lra_lu']),
-    'spectral_balance': ('low_end_share', lambda v: v['low_end_share']),
-    'lead_register': ('lead_register_midi', lambda v: v['median_midi']),
-}
+SECTION_COUNT_NOTE = (
+    'Sixteen structure segmentation methods were run at one fixed '
+    'configuration and none generalise across the three track corpus. The best '
+    'candidate returns 7, 6 and 10, matches 4 of 6 known boundaries, and was '
+    'selected by noticing which row of a table hit the known answer, which is '
+    'selection on the one track that has one. Reporting a count that is about '
+    'half likely to be wrong is worse than reporting none, because a stated '
+    'number invites downstream use that a missing one does not. Boundaries are '
+    'emitted separately and are real.')
 
 
 def _sha256(path):
@@ -943,90 +1216,374 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def _load(path, sr=22050):
+def _load(path, sr=SR):
     y, _ = librosa.load(str(path), sr=sr, mono=True)
     return y
 
 
-def _register(y, sr, fmin, fmax, stem, band):
-    """Median and spread of a pitch track, in MIDI note numbers."""
+def _rms_db(y):
+    if len(y) == 0:
+        return float('-inf')
+    value = float(np.sqrt(np.mean(np.asarray(y, dtype=np.float64) ** 2)))
+    return 20.0 * math.log10(value) if value > 0 else float('-inf')
+
+
+def _beat_times(drums, sr, bpm):
+    """A beat grid at the tempo the tempo family already chose.
+
+    Seeding matters. An unseeded tracker picks its own metrical level, and on
+    this corpus it lands on different levels for different tracks, reporting
+    152 BPM for one stated at about 103. The tempo family has already made
+    that decision with three methods and a published grade; re-deciding it
+    here would silently override it with one method and no grade.
+    """
+    if not bpm or bpm <= 0:
+        return np.array([])
+    onset = librosa.onset.onset_strength(y=drums, sr=sr)
+    _, beats = librosa.beat.beat_track(onset_envelope=onset, sr=sr,
+                                       bpm=float(bpm), trim=False)
+    return librosa.frames_to_time(beats, sr=sr)
+
+
+def _register(y, sr, fmin, fmax, stem, band, actionable):
+    """Median and spread of a pitch track, in MIDI note numbers.
+
+    A helper, not an axis builder. The two register axes wrap it.
+    """
     if len(y) == 0 or float(np.max(np.abs(y))) < 1e-6:
-        return fact(None, 'midi', stem, ['yin'], 'UNKNOWN', 'direct',
+        return fact(None, 'midi', stem, ['yin'], 'UNKNOWN', actionable,
                     band_hz=band, note='stem is silent')
     f0 = librosa.yin(y.astype(np.float64), fmin=fmin, fmax=fmax, sr=sr)
     f0 = f0[np.isfinite(f0) & (f0 > fmin) & (f0 < fmax)]
     if len(f0) < 16:
-        return fact(None, 'midi', stem, ['yin'], 'UNKNOWN', 'direct',
+        return fact(None, 'midi', stem, ['yin'], 'UNKNOWN', actionable,
                     band_hz=band, note='no stable pitch track')
     midi = librosa.hz_to_midi(f0)
     value = {'median_midi': round(float(np.median(midi)), 2),
              'p10_midi': round(float(np.percentile(midi, 10)), 2),
              'p90_midi': round(float(np.percentile(midi, 90)), 2)}
-    return fact(value, 'midi', stem, ['yin'], 'INFER', 'direct', band_hz=band,
-                note='single method pitch track over a separated stem')
+    return fact(value, 'midi', stem, ['yin'], 'INFER', actionable, band_hz=band,
+                note='single method pitch track over a separated stem, and yin '
+                     'octave errors are common in this band')
 ```
 
-The remaining axis builders follow the same pattern. Write them in this order,
-running the suite after each so a break names its own axis:
+- [ ] **Step 4: Write the axis builders**
 
-`_tempo_fact` wraps `tempo_mod.tempo_family(paths['drums'])` and carries that
-function's own `confidence` straight through, because that grading already
-exists and re-deriving it here would be a second opinion nobody asked for.
-
-`_key_fact` and `_chords_fact` call `chords_mod.key_estimate` and
-`chords_mod.chord_sequence` on the guitar and bass signals, band 150 to 2500.
-Grade `key` as `KNOW` when the margin is at least 0.05 and the chord sequence's
-most common root agrees with the key's tonic, `INFER` when only one of those
-holds, `UNKNOWN` when the estimate returned no key.
-
-`_tuning_fact` calls `chords_mod.tuning_estimate` on the bass stem summed with
-the guitar stem. Grade `KNOW` when `margin_cents` is under 25 and the result
-agrees on both stems measured separately, otherwise `INFER`, and `UNKNOWN` when
-the estimate returned no tuning.
-
-`_sections_fact` reuses `measure_mod.measure`'s `segment_boundaries_s` on the
-mix and emits `{'count': n, 'boundaries_s': [...]}`. Grade `INFER` always: these
-are clustering suggestions, not verified verses and choruses, and the parent
-spec is explicit that they must stay labelled that way.
-
-`_intro_fact` is the one axis with no existing implementation to lean on. Its
-definition: for each 1 second window, count the stems whose RMS exceeds
-`ACTIVE_DB`; the intro ends at the first window where that count first reaches
-its track wide maximum; snap that time to the nearest section boundary within
-4 seconds if one exists. Grade `INFER` when the snap moved it, `KNOW` when the
-density transition and a section boundary already agreed within 1 second.
-
-`_loudness_fact` reuses `measure_mod.measure`'s `integrated_lufs`, `lra_lu` and
-`true_peak_dbtp`, graded `KNOW`, method `['ebur128']`. These come from ffmpeg's
-BS.1770 implementation and are the one place in this sheet where a single method
-is genuinely authoritative.
-
-`_spectral_fact` computes, on the mix, the share of total spectral energy below
-`LOW_END_HZ`, the spectral centroid, and the share above `AIR_HZ`, as
-`{'low_end_share': pct, 'centroid_hz': hz, 'air_share': pct}`, graded `KNOW`,
-method `['stft-band-share']`.
-
-`_dynamic_arc_fact` reuses `measure_mod.measure`'s `rms_db_per_4s`, normalised
-to the track's own peak, graded `KNOW`, actionable `indirect`.
-
-`_note_density_fact` is the guitar stem's onset rate divided by the primary
-tempo's beats per second, graded `INFER`, actionable `indirect`.
-
-`_meter_fact` autocorrelates the drums onset envelope at the beat period and
-reports the strongest grouping of 3 or 4. Grade `INFER`; published benchmarks
-put meter identification well below the other axes and this is one method.
-
-`_vocal_register_fact` is `_register(vocals, sr, 70, 1200, 'vocals', [70, 1200])`
-with actionable `direct`.
-
-`_lead_register_fact` is `_register(band_limit(guitar, 70, 1400), sr, 70, 1400,
-'guitar', [70, 1400])` with actionable `direct`. This axis exists because four
-generation cycles were spent discovering by ear that an intro had arrived an
-octave high.
-
-Then the assembler:
+Every builder takes the same six arguments and returns a `fact()`. Write them in
+this order, running the suite after each so a break names its own axis.
 
 ```python
+def _tempo_fact(paths, loaded, mix, sr, local, built):
+    result = tempo_mod.tempo_family(paths['drums'])
+    note = result.get('disagreement')
+    return fact(result['primary'], 'bpm', 'drums',
+                ['tempogram-peak', 'beat-track', 'inter-onset'],
+                result['confidence'], 'direct', note=note)
+```
+
+The tempo axis carries `tempo_family`'s own grade straight through. That
+grading already exists, is tested, and re-deriving it here would be a second
+opinion nobody asked for.
+
+```python
+def _instrumentation_fact(paths, loaded, mix, sr, local, built):
+    levels = {name: _rms_db(y) for name, y in loaded.items()}
+    finite = [v for v in levels.values() if math.isfinite(v)]
+    loudest = max(finite) if finite else float('-inf')
+    value = {name: {'rms_db': (round(db, 2) if math.isfinite(db) else None),
+                    'active': bool(math.isfinite(db) and db >= loudest - PRESENCE_DB)}
+             for name, db in levels.items()}
+    present = sorted(n for n, v in value.items() if v['active'])
+    return fact(value, 'dbfs', 'all', ['stem-rms'], 'KNOW', 'direct',
+                note=f'present: {", ".join(present)}. A stem more than '
+                     f'{PRESENCE_DB:g} dB below the loudest reads absent, which '
+                     f'is a measurement of the arrangement, not a separation '
+                     f'failure.')
+```
+
+This axis exists because the parent spec's pipeline gate read "six stems, all
+non-silent", and the reference track's piano stem measures -58.29 dBFS with a
+peak of 0.0029. That is a correct separation of a track with no piano. A gate
+that fails a correct measurement teaches the wrong lesson, so the near silent
+stem becomes a measurement instead. It is also the axis a prompt needs in order
+to name the instruments actually present rather than the six demucs always emits.
+
+```python
+def _key_fact(paths, loaded, mix, sr, local, built):
+    result = chords_mod.key_estimate([loaded['guitar'], loaded['bass']], sr)
+    band = [150, 2500]
+    if result['key'] is None:
+        return fact(None, 'name', 'guitar+bass', ['chroma-cqt-krumhansl'],
+                    'UNKNOWN', 'direct', band_hz=band,
+                    note='no key resolved')
+    grade = 'KNOW' if result['margin'] >= 0.05 else 'INFER'
+    return fact(result['key'], 'name', 'guitar+bass',
+                ['chroma-cqt-krumhansl'], grade, 'direct', band_hz=band,
+                note=f'margin {result["margin"]} over the runner up '
+                     f'{result["scores"][1][0] if len(result["scores"]) > 1 else "none"}. '
+                     f'These are template correlations, not probabilities.')
+```
+
+```python
+def _tuning_fact(paths, loaded, mix, sr, local, built):
+    result = chords_mod.tuning_estimate(loaded['bass'], sr)
+    band = [25, 200]
+    if result['tuning'] is None:
+        return fact(None, 'name', 'bass', ['yin-semitone-histogram'],
+                    'UNKNOWN', 'direct', band_hz=band,
+                    note=f'no semitone bin cleared the '
+                         f'{chords_mod.SUPPORT_FLOOR:g} support floor')
+    return fact(result['tuning'], 'name', 'bass', ['yin-semitone-histogram'],
+                'INFER', 'direct', band_hz=band,
+                note=f'lowest sustained semitone {result["lowest_hz"]} Hz with '
+                     f'{result["support"]:.3f} frame support, {result["margin_cents"]} '
+                     f'cents from the template. Read from the bass only: the '
+                     f'guitar stem is dominated by yin octave errors in this '
+                     f'band and cannot corroborate it.')
+```
+
+Graded `INFER`, never `KNOW`. Revision 1 graded it `KNOW` when both stems agreed
+separately, and on the real track both stems agreed on `drop D`, which is wrong.
+A rule that promotes a shared artifact to `KNOW` is worse than no rule.
+
+```python
+def _chords_fact(paths, loaded, mix, sr, local, built):
+    band = [150, 2500]
+    tempo_entry = built.get('tempo') or {}
+    beats = _beat_times(loaded['drums'], sr, tempo_entry.get('value'))
+    if not len(beats):
+        return fact(None, 'sequence', 'guitar+bass', ['beat-sync-chroma'],
+                    'UNKNOWN', 'midi_only', band_hz=band,
+                    note='no beat grid, so no bar windows to read chords over')
+    sequence = chords_mod.chord_sequence(
+        [loaded['guitar'], loaded['bass']], sr, beats)
+    if not sequence:
+        return fact(None, 'sequence', 'guitar+bass', ['beat-sync-chroma'],
+                    'UNKNOWN', 'midi_only', band_hz=band,
+                    note='no chord resolved in any bar window')
+    powers = sum(1 for e in sequence if e['quality'] == 'power')
+    return fact(sequence, 'sequence', 'guitar+bass', ['beat-sync-chroma'],
+                'INFER', 'midi_only', band_hz=band,
+                note=f'{len(sequence)} bars, {powers} with no measured third. '
+                     f'Chord names are midi_only: text prompts discard them.')
+
+
+def _harmonic_rhythm_fact(paths, loaded, mix, sr, local, built):
+    band = [150, 2500]
+    sequence = (built.get('chords') or {}).get('value')
+    if not sequence:
+        return fact(None, 'bars', 'guitar+bass', ['chord-run-length'],
+                    'UNKNOWN', 'indirect', band_hz=band,
+                    note='no chord sequence to measure a rate over')
+    result = chords_mod.harmonic_rhythm(sequence)
+    return fact(result, 'bars', 'guitar+bass', ['chord-run-length'],
+                'INFER', 'indirect', band_hz=band,
+                note='inherits the chord sequence\'s own uncertainty')
+```
+
+`built` is the accumulating dict, which is how a later axis reads an earlier
+one. `tempo` is built before `chords`, and `chords` before `harmonic_rhythm`.
+
+```python
+def _section_boundaries_fact(paths, loaded, mix, sr, local, built):
+    boundaries = [float(t) for t in local.get('segment_boundaries_s') or []]
+    if not boundaries:
+        return fact(None, 'seconds', 'mix', ['agglomerative-clustering'],
+                    'UNKNOWN', 'none', note='no boundaries resolved')
+    return fact(boundaries, 'seconds', 'mix', ['agglomerative-clustering'],
+                'INFER', 'direct',
+                note='clustering suggestions, not verified verses and choruses')
+
+
+def _section_count_fact(paths, loaded, mix, sr, local, built):
+    return fact(None, 'count', 'mix',
+                ['agglomerative-clustering', 'laplacian-segmentation',
+                 'checkerboard-novelty', 'dp-bic-changepoint'],
+                'UNKNOWN', 'none', note=SECTION_COUNT_NOTE)
+```
+
+The count axis is `UNKNOWN` by construction and carries all four method families
+that were tried, so a reader can see it was attempted rather than skipped. This
+is the legitimate use of `UNKNOWN`: a method that genuinely cannot resolve.
+
+```python
+def _intro_fact(paths, loaded, mix, sr, local, built):
+    window = int(sr)
+    count = min(len(y) for y in loaded.values()) // window
+    if count < 3:
+        return fact(None, 'seconds', 'mix', ['stem-density-step'],
+                    'UNKNOWN', 'direct', note='too short to read a density step')
+    density = []
+    for i in range(count):
+        active = sum(1 for y in loaded.values()
+                     if _rms_db(y[i * window:(i + 1) * window]) > ACTIVE_DB)
+        density.append(active)
+    steps = np.diff(np.asarray(density))
+    if not len(steps) or steps.max() <= 0:
+        return fact(None, 'seconds', 'mix', ['stem-density-step'],
+                    'UNKNOWN', 'direct',
+                    note='arrangement density never increases')
+    raw = float(int(np.argmax(steps)) + 1)
+    boundaries = (built.get('section_boundaries') or {}).get('value') or []
+    near = [b for b in boundaries if abs(b - raw) <= INTRO_SNAP_S]
+    if near:
+        snapped = min(near, key=lambda b: abs(b - raw))
+        return fact(round(float(snapped), 2), 'seconds', 'mix',
+                    ['stem-density-step', 'agglomerative-clustering'],
+                    'KNOW', 'direct',
+                    note=f'largest arrangement density step at {raw:.0f} s, '
+                         f'confirmed by a section boundary at {snapped:.2f} s')
+    return fact(raw, 'seconds', 'mix', ['stem-density-step'], 'INFER', 'direct',
+                note=f'largest arrangement density step at {raw:.0f} s, with no '
+                     f'section boundary within {INTRO_SNAP_S:g} s to confirm it')
+```
+
+The rule is the largest single window increase in the number of active stems.
+Revision 1 waited for the count to reach its track wide maximum, which waits for
+the last stem to enter and returned about 88 seconds against a known 12.1. The
+rule above returns 12 seconds at `ACTIVE_DB` of -35, -40 and -45, a 10 dB
+spread, and snaps to the measured boundary at 12.12. A rule whose answer does
+not move across a 10 dB change in its only constant is reading the arrangement,
+not the constant.
+
+```python
+def _loudness_fact(paths, loaded, mix, sr, local, built):
+    value = {'integrated_lufs': local.get('integrated_lufs'),
+             'lra_lu': local.get('lra_lu'),
+             'true_peak_dbtp': local.get('true_peak_dbtp')}
+    if value['lra_lu'] is None:
+        return fact(None, 'lu', 'mix', ['ebur128'], 'UNKNOWN', 'indirect',
+                    note='ffmpeg returned no loudness summary')
+    return fact(value, 'lu', 'mix', ['ebur128'], 'KNOW', 'indirect',
+                note='ITU-R BS.1770-4 via ffmpeg, the one axis here where a '
+                     'single method is genuinely authoritative')
+
+
+def _spectral_fact(paths, loaded, mix, sr, local, built):
+    S = np.abs(librosa.stft(mix, n_fft=N_FFT))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=N_FFT)
+    per_frame = S.sum(axis=0)
+    per_frame[per_frame == 0] = 1.0
+    low = float(np.mean(S[freqs < LOW_END_HZ].sum(axis=0) / per_frame)) * 100
+    air = float(np.mean(S[freqs > AIR_HZ].sum(axis=0) / per_frame)) * 100
+    centroid = float(np.mean(librosa.feature.spectral_centroid(S=S, sr=sr)))
+    value = {'low_end_share': round(low, 2), 'air_share': round(air, 2),
+             'centroid_hz': round(centroid, 1)}
+    return fact(value, 'percent', 'mix', ['stft-band-share'], 'KNOW', 'indirect',
+                band_hz=[0, int(sr // 2)],
+                note=f'low end is the per frame mean magnitude share below '
+                     f'{LOW_END_HZ:g} Hz at n_fft {N_FFT}, sr {sr}, mono. The '
+                     f'definition is pinned because the readings of "share of '
+                     f'spectral energy" span 10.8 to 58.0 percent on one track '
+                     f'depending on magnitude against power, global against per '
+                     f'frame, and crossover. Both sides of a comparison must '
+                     f'run through this same function.')
+
+
+def _dynamic_arc_fact(paths, loaded, mix, sr, local, built):
+    arc = local.get('rms_db_per_4s') or []
+    usable = [v for _, v in arc if v is not None]
+    if not usable:
+        return fact(None, 'db', 'mix', ['rms-per-4s'], 'UNKNOWN', 'indirect',
+                    note='no usable RMS windows')
+    peak = max(usable)
+    value = [[float(t), (None if v is None else round(float(v) - peak, 2))]
+             for t, v in arc]
+    return fact(value, 'db', 'mix', ['rms-per-4s'], 'KNOW', 'indirect',
+                note='normalised to the track\'s own peak window')
+
+
+def _note_density_fact(paths, loaded, mix, sr, local, built):
+    bpm = (built.get('tempo') or {}).get('value')
+    guitar = loaded['guitar']
+    if not bpm or bpm <= 0 or float(np.max(np.abs(guitar))) < 1e-6:
+        return fact(None, 'onsets_per_beat', 'guitar', ['onset-rate'],
+                    'UNKNOWN', 'indirect', band_hz=[150, 2500],
+                    note='no tempo or a silent stem')
+    band = chords_mod.band_limit(guitar, sr, 150, 2500)
+    onsets = librosa.onset.onset_detect(y=band, sr=sr, units='time')
+    seconds = len(band) / sr
+    if seconds <= 0:
+        return fact(None, 'onsets_per_beat', 'guitar', ['onset-rate'],
+                    'UNKNOWN', 'indirect', band_hz=[150, 2500],
+                    note='zero length stem')
+    per_beat = (len(onsets) / seconds) / (float(bpm) / 60.0)
+    return fact(round(float(per_beat), 3), 'onsets_per_beat', 'guitar',
+                ['onset-rate'], 'INFER', 'indirect', band_hz=[150, 2500],
+                note='onset rate normalised to the measured beat')
+
+
+def _meter_fact(paths, loaded, mix, sr, local, built):
+    bpm = (built.get('tempo') or {}).get('value')
+    if not bpm or bpm <= 0:
+        return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
+                    'UNKNOWN', 'direct', note='no tempo to group beats against')
+    onset = librosa.onset.onset_strength(y=loaded['drums'], sr=sr)
+    if not len(onset) or float(np.max(onset)) <= 1e-5:
+        return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
+                    'UNKNOWN', 'direct', note='no onsets in the drums stem')
+    hop = 512
+    frames_per_beat = (60.0 / float(bpm)) * sr / hop
+    ac = librosa.autocorrelate(onset - onset.mean())
+    scores = {}
+    for grouping in (3, 4):
+        lag = int(round(frames_per_beat * grouping))
+        scores[grouping] = float(ac[lag]) if 0 < lag < len(ac) else float('-inf')
+    best = max(scores, key=scores.get)
+    if not math.isfinite(scores[best]):
+        return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
+                    'UNKNOWN', 'direct', note='autocorrelation lag out of range')
+    return fact(best, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
+                'INFER', 'direct',
+                note=f'3 scored {scores[3]:.3f}, 4 scored {scores[4]:.3f}. '
+                     f'Published benchmarks put meter identification well below '
+                     f'the other axes and this is one method.')
+
+
+def _lead_register_fact(paths, loaded, mix, sr, local, built):
+    band = chords_mod.band_limit(loaded['guitar'], sr, 70, 1400)
+    return _register(band, sr, 70, 1400, 'guitar', [70, 1400], 'direct')
+
+
+def _vocal_register_fact(paths, loaded, mix, sr, local, built):
+    return _register(loaded['vocals'], sr, 70, 1200, 'vocals', [70, 1200],
+                     'direct')
+```
+
+- [ ] **Step 5: Write the assembler, the projection and the renderer**
+
+```python
+BUILDERS = (
+    ('tempo', _tempo_fact),
+    ('meter', _meter_fact),
+    ('instrumentation', _instrumentation_fact),
+    ('key', _key_fact),
+    ('tuning', _tuning_fact),
+    ('chords', _chords_fact),
+    ('harmonic_rhythm', _harmonic_rhythm_fact),
+    ('section_boundaries', _section_boundaries_fact),
+    ('section_count', _section_count_fact),
+    ('intro_seconds', _intro_fact),
+    ('note_density', _note_density_fact),
+    ('lead_register', _lead_register_fact),
+    ('vocal_register', _vocal_register_fact),
+    ('loudness', _loudness_fact),
+    ('spectral_balance', _spectral_fact),
+    ('dynamic_arc', _dynamic_arc_fact),
+)
+
+PROJECTION = {
+    'tempo': ('tempo_bpm', lambda v: v),
+    'key': ('key', lambda v: v),
+    'tuning': ('tuning', lambda v: v),
+    'intro_seconds': ('intro_seconds', lambda v: v),
+    'section_count': ('section_count', lambda v: v),
+    'loudness': ('lra_lu', lambda v: v['lra_lu']),
+    'spectral_balance': ('low_end_share', lambda v: v['low_end_share']),
+    'lead_register': ('lead_register_midi', lambda v: v['median_midi']),
+}
+
+
 def fact_sheet(audio, stems_dir=None, cache_root=None):
     audio = Path(audio)
     if stems_dir is not None:
@@ -1037,21 +1594,12 @@ def fact_sheet(audio, stems_dir=None, cache_root=None):
             raise FactError('separating stems needs a cache_root')
         paths = stems_mod.separate(audio, cache_root)
         origin = 'separated'
-    sr = 22050
-    loaded = {name: _load(path, sr) for name, path in paths.items()}
-    mix = _load(audio, sr)
+    loaded = {name: _load(path) for name, path in paths.items()}
+    mix = _load(audio)
     local = measure_mod.measure(str(audio))
     built = {}
-    for name, builder in (
-            ('tempo', _tempo_fact), ('meter', _meter_fact), ('key', _key_fact),
-            ('chords', _chords_fact), ('harmonic_rhythm', _harmonic_rhythm_fact),
-            ('sections', _sections_fact), ('intro_seconds', _intro_fact),
-            ('note_density', _note_density_fact),
-            ('lead_register', _lead_register_fact), ('tuning', _tuning_fact),
-            ('loudness', _loudness_fact), ('spectral_balance', _spectral_fact),
-            ('dynamic_arc', _dynamic_arc_fact),
-            ('vocal_register', _vocal_register_fact)):
-        built[name] = builder(paths, loaded, mix, sr, local, built)
+    for name, builder in BUILDERS:
+        built[name] = builder(paths, loaded, mix, SR, local, built)
     return {
         'schema': SCHEMA,
         'generated_at': _dt.datetime.now(_dt.timezone.utc)
@@ -1069,6 +1617,11 @@ def scorable(sheet):
     An UNKNOWN axis is omitted rather than passed as null. compare reports an
     absent axis as UNKNOWN and counts it under UNMEASURED, so omission gives
     the honest verdict and null would be a second way to say the same thing.
+
+    This omission is also a hole, and Task 8 is what closes it: a sheet that
+    graded its failing axes UNKNOWN would project only its passing ones and
+    score PASS. The corpus gate therefore asserts how many axes were measured,
+    not only the verdict.
     """
     out = {}
     for axis, (target, pick) in PROJECTION.items():
@@ -1086,14 +1639,20 @@ def render_markdown(sheet):
     lines = ['# Fact sheet', '',
              f'Source: `{sheet["source"]["path"]}`',
              f'Duration: {sheet["source"]["duration_s"]} s',
-             f'Stems: {sheet["stems_from"]}', '',
+             f'Stems: {sheet["stems_from"]}',
+             f'Generated: {sheet["generated_at"]}', '',
              '| Axis | Value | Unit | Stem | Band Hz | Confidence | Method | Suno |',
              '|---|---|---|---|---|---|---|---|']
     for axis, entry in sheet['facts'].items():
         band = '' if entry['band_hz'] is None else \
             f'{entry["band_hz"][0]} to {entry["band_hz"][1]}'
+        value = entry['value']
+        if isinstance(value, (list, dict)):
+            shown = f'{len(value)} entries'
+        else:
+            shown = value
         lines.append(
-            f'| {axis} | {entry["value"]} | {entry["unit"]} | {entry["stem"]} | '
+            f'| {axis} | {shown} | {entry["unit"]} | {entry["stem"]} | '
             f'{band} | {entry["confidence"]} | {", ".join(entry["method"])} | '
             f'{entry["suno_actionable"]} |')
     notes = [(a, e['note']) for a, e in sheet['facts'].items() if e['note']]
@@ -1103,17 +1662,18 @@ def render_markdown(sheet):
     return '\n'.join(lines) + '\n'
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 6: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 20 tests
+Expected: PASS, 28 tests
 
 If `test_two_runs_on_the_same_audio_agree_apart_from_the_timestamp` fails, do not
 round harder until it passes. Find which axis moved, name the stochastic step
-inside it, and seed it. An axis that cannot be made stable is graded `UNKNOWN`
-with a note saying why, which is a real answer. Silent rounding is not.
+inside it, and seed it. The critic checked `measure`, `tempo_family`,
+`key_estimate` and `tuning_estimate` for non-determinism and found none, so a
+failure here is most likely a new axis, not an inherited one.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/facts.py tests/test_facts.py
@@ -1122,7 +1682,7 @@ git commit -m "feat: assemble the graded fact sheet"
 
 ---
 
-### Task 6: The tuning axis on compare
+### Task 6: The tuning axis on compare, and the four assertions it moves
 
 **Files:**
 - Modify: `scripts/compare.py`
@@ -1132,6 +1692,13 @@ git commit -m "feat: assemble the graded fact sheet"
 - Consumes: nothing.
 - Produces: a `tuning` entry in `compare.GATES`, and `tuning_verdict(reference, candidate) -> tuple[str, str]`.
 
+**Read this before you start.** Revision 1 claimed adding this gate would not
+touch the existing tests. That was false. `tests/test_compare.py:10` defines
+`REFERENCE` with seven axes and no `tuning` key, and four assertions count axes
+or unmeasured axes. Adding an eighth gate changes all of them. Step 4 below
+updates them, and that is part of this task, not a surprise you meet as four red
+tests with no instruction.
+
 - [ ] **Step 1: Write the failing test**
 
 Append to `tests/test_compare.py` before `if __name__`:
@@ -1139,31 +1706,30 @@ Append to `tests/test_compare.py` before `if __name__`:
 ```python
 class TuningAxisTests(unittest.TestCase):
     def test_the_same_tuning_passes(self):
-        result = c.score(dict(REFERENCE, tuning='drop C#'),
-                         dict(REFERENCE, tuning='drop C#'))
+        result = c.score(REFERENCE, dict(REFERENCE))
         axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
         self.assertEqual(axis['verdict'], 'PASS')
 
     def test_an_enharmonic_spelling_is_the_same_tuning(self):
-        result = c.score(dict(REFERENCE, tuning='drop C#'),
-                         dict(REFERENCE, tuning='Drop Db'))
+        result = c.score(REFERENCE, dict(REFERENCE, tuning='Drop Db'))
         axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
         self.assertEqual(axis['verdict'], 'PASS')
 
     def test_a_neighbouring_tuning_fails_rather_than_warning(self):
-        result = c.score(dict(REFERENCE, tuning='drop C#'),
-                         dict(REFERENCE, tuning='drop D'))
+        result = c.score(REFERENCE, dict(REFERENCE, tuning='drop D'))
         axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
         self.assertEqual(axis['verdict'], 'FAIL')
 
     def test_an_unmeasured_tuning_is_unknown_not_a_pass(self):
-        result = c.score(dict(REFERENCE, tuning='drop C#'), dict(REFERENCE))
+        candidate = {k: v for k, v in REFERENCE.items() if k != 'tuning'}
+        result = c.score(REFERENCE, candidate)
         axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
         self.assertEqual(axis['verdict'], 'UNKNOWN')
 
-    def test_the_existing_seven_axes_are_untouched(self):
-        result = c.score(REFERENCE, dict(REFERENCE))
-        self.assertEqual(result['verdict'], 'PASS')
+    def test_a_tuning_that_is_not_a_string_is_unknown_not_a_crash(self):
+        result = c.score(REFERENCE, dict(REFERENCE, tuning=7))
+        axis = next(a for a in result['axes'] if a['axis'] == 'tuning')
+        self.assertEqual(axis['verdict'], 'UNKNOWN')
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1212,12 +1778,26 @@ And in `score`, beside the `key` branch:
             delta = None
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Update the four assertions the new axis moves**
 
-Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests -v`
-Expected: OK, no regression in the existing compare tests
+In `tests/test_compare.py`:
 
-- [ ] **Step 5: Commit**
+1. Add `'tuning': 'drop C#'` to `REFERENCE` at line 10.
+2. `self.assertEqual(len(result['axes']), 7)` becomes `8`.
+3. `self.assertEqual(result['unmeasured'], 5)` becomes `6`.
+4. Both `self.assertEqual(result['unmeasured'], 1)` become `2`.
+
+Read each one before changing it and confirm the new number from the test's own
+setup rather than from this list. If a number here disagrees with what the test
+actually constructs, the test is right and this list is wrong. Say so in the
+pull request.
+
+- [ ] **Step 5: Run the whole suite**
+
+Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`
+Expected: OK, with the count above the 97 baseline and nothing red.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/compare.py tests/test_compare.py
@@ -1235,40 +1815,61 @@ git commit -m "feat: score tuning, the axis the bar named and compare could not 
 - Consumes: `facts.fact_sheet`, `facts.scorable`, `facts.render_markdown`.
 - Produces: CLI `facts <audio> [--stems DIR] [--out DIR]`, printing `FACTS_WRITTEN=<path>`.
 
-- [ ] **Step 1: Add the import**
+**Three repo invariants this task must not break.** Each is a bug the repo
+already fixed once and documents in a comment.
 
-Below the existing imports in `scripts/deconstruct.py`:
+1. `import facts` goes **inside** `cmd_facts`, never at module level. See the
+   comment at `scripts/deconstruct.py:22`.
+2. `secure_config_dir()`, never `config_dir()`, for the cache root. See the
+   docstring at `scripts/deconstruct.py:67` and the existing call at line 549.
+3. Wrap the module's own errors in `SkillError` so the authored message reaches
+   the user. The top-level handler at line 730 prints authored text only for
+   `SkillError`; anything else becomes `ERROR: <TypeName> ... Details
+   suppressed to protect secrets`. `cmd_separate` wraps at line 552. Without
+   this, `StemAdoptionError`'s carefully written message is dead text.
 
-```python
-import facts as facts_mod
-```
+- [ ] **Step 1: Add the command function**
 
-- [ ] **Step 2: Add the command function**
-
-Above `def main():`:
+Above `def main():` in `scripts/deconstruct.py`:
 
 ```python
 def cmd_facts(args):
-    out = args.out or Path.cwd()
+    import facts as facts_mod
+    out = args.out or (Path.cwd() / 'reports')
     out.mkdir(parents=True, exist_ok=True)
-    sheet = facts_mod.fact_sheet(args.audio, stems_dir=args.stems,
-                                 cache_root=config_dir() / 'cache')
-    (out / 'facts.json').write_text(
-        json.dumps(sheet, indent=2, allow_nan=False), encoding='utf-8')
-    (out / 'facts.md').write_text(
-        facts_mod.render_markdown(sheet), encoding='utf-8')
-    (out / 'scorable.json').write_text(
-        json.dumps(facts_mod.scorable(sheet), indent=2, allow_nan=False),
-        encoding='utf-8')
+    try:
+        sheet = facts_mod.fact_sheet(args.audio, stems_dir=args.stems,
+                                     cache_root=secure_config_dir() / 'cache')
+    except (facts_mod.FactError, facts_mod.StemAdoptionError) as exc:
+        raise SkillError(str(exc)) from None
+    write_json(out / 'facts.json', sheet)
+    (out / 'facts.md').write_text(facts_mod.render_markdown(sheet),
+                                  encoding='utf-8')
+    write_json(out / 'scorable.json', facts_mod.scorable(sheet))
     graded = {}
     for entry in sheet['facts'].values():
         graded[entry['confidence']] = graded.get(entry['confidence'], 0) + 1
     print(f'FACTS_WRITTEN={out / "facts.json"}')
+    print(f'SCORABLE_WRITTEN={out / "scorable.json"}')
     for grade in ('KNOW', 'INFER', 'UNKNOWN'):
         print(f'{grade}={graded.get(grade, 0)}')
+    unknown = sorted(a for a, e in sheet['facts'].items()
+                     if e['confidence'] == 'UNKNOWN')
+    if unknown:
+        print(f'UNRESOLVED={",".join(unknown)}')
 ```
 
-- [ ] **Step 3: Register and dispatch**
+`write_json` is whatever atomic JSON writer this file already uses for
+`measurements.json`. Find it and use it rather than adding a second one; if the
+existing writer is not reusable, use `json.dumps(..., indent=2,
+allow_nan=False)` through the same `tempfile.mkstemp` then `os.replace` pattern
+the module already has, and say in the pull request which you did.
+
+The default output is `./reports`, matching `analyze`, because `.gitignore`
+already excludes `reports/` and defaulting to the bare working directory would
+drop three untracked files into the repo root.
+
+- [ ] **Step 2: Register and dispatch**
 
 With the other parsers in `main()`:
 
@@ -1287,17 +1888,25 @@ With the other branches:
         cmd_facts(args)
 ```
 
-- [ ] **Step 4: Verify the command exists**
+- [ ] **Step 3: Verify the command exists and doctor still survives a broken install**
 
-Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python scripts/deconstruct.py facts --help`
-Expected: usage text showing `--stems`
+```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+.venv/bin/python scripts/deconstruct.py facts --help
+python3 scripts/deconstruct.py doctor
+```
 
-- [ ] **Step 5: Run the whole suite**
+Expected: usage text showing `--stems`, and then `doctor` printing its JSON
+under the bare system interpreter, which has no librosa. That second command is
+the actual test of the lazy import rule, and the unit suite cannot perform it
+because the suite runs with librosa installed.
+
+- [ ] **Step 4: Run the whole suite**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`
 Expected: OK
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/deconstruct.py
@@ -1316,7 +1925,7 @@ The desk is `/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09
 
 **Interfaces:**
 - Consumes: `facts.fact_sheet`, `facts.scorable`.
-- Produces: a script printing one `TRACK=<name> STABLE=<yes|no>` line per track and a final `CORPUS_STABLE=<n>/3`.
+- Produces: a script printing one `TRACK=... STABLE=...` line per track and a final `CORPUS_STABLE=<n>/3`.
 
 - [ ] **Step 1: Write the known values file**
 
@@ -1327,16 +1936,26 @@ Create `<desk>/evidence/known-murder-she-wrote.json`:
   "tempo_bpm": 80.7,
   "key": "F# minor",
   "tuning": "drop C#",
-  "section_count": 7,
   "intro_seconds": 12.1,
-  "low_end_share": 16.4
+  "lra_lu": 4.1
 }
 ```
 
-These are the user's known values. `lra_lu` and `lead_register_midi` are absent
-on purpose: they are not among the known six, and inventing a reference figure
-so that an axis reports PASS would be the exact defect this project exists to
-stop. `compare` counts them under `UNMEASURED=` and that is the honest reading.
+Five axes, each with ground truth established outside this pipeline. What is
+absent, and why, matters as much as what is present:
+
+- `section_count` is absent because no method resolved it. Sixteen were tried.
+  See `SECTIONS-research.md`.
+- `low_end_share` is absent because 16.4 percent could not be reproduced by any
+  of eight readings, which span 10.8 to 58.0 on this track. Putting a figure
+  here that this pipeline cannot produce would make the axis fail forever;
+  putting this pipeline's own figure here would make it pass forever. Neither
+  is a measurement. The axis is scored at the exit bar, where both sides run
+  through the same function.
+- `lead_register_midi` is absent for the same reason in the other direction:
+  the parent spec names F sharp 2, nothing in this pipeline has validated that,
+  and the yin octave errors documented on the guitar stem make it likely to be
+  wrong. It is measured and reported, and it becomes a gate at the exit bar.
 
 - [ ] **Step 2: Write the corpus script**
 
@@ -1346,9 +1965,11 @@ Create `scripts/corpus_check.py`:
 #!/usr/bin/env python3
 """Run every corpus track twice and report whether the sheet held still.
 
-Stability is a gate rather than an assumption because two of the measurement
-libraries have stochastic paths, and a fact sheet that moves between runs
-cannot support a comparison.
+Stability is a gate rather than an assumption because a fact sheet that moves
+between runs cannot support a comparison. Note that a rerun here does NOT
+re-exercise separation: the stems are cached by source hash, so the second
+call reads the same stems. This gate proves the measurement layer is
+deterministic, not the separation layer.
 """
 import argparse
 import json
@@ -1360,21 +1981,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import facts as facts_mod
 
 HOME = Path(os.path.expanduser('~'))
+DESKTOP = HOME / 'Desktop' / 'mydaiarytoyou!'
 CORPUS = [
     {'name': 'Murder, She Wrote',
      'audio': HOME / 'Downloads' /
               'mydiarytoyou! - Murder, She Wrote (Official Visualizer).mp3',
      'stems': None},
     {'name': 'The Danger of Caring',
-     'audio': HOME / 'Desktop' / 'mydaiarytoyou!' / 'The Danger of Caring' /
+     'audio': DESKTOP / 'The Danger of Caring' /
               'mydiarytoyou! - The Danger of Caring (Official Visualizer).mp3',
-     'stems': HOME / 'Desktop' / 'mydaiarytoyou!' / 'The Danger of Caring'},
+     'stems': DESKTOP / 'The Danger of Caring'},
     {'name': 'Wrong Turn',
-     'audio': HOME / 'Desktop' / 'mydaiarytoyou!' / 'Wrong Turn' /
+     'audio': DESKTOP / 'Wrong Turn' /
               'mydiarytoyou! - Wrong Turn (Official Visualizer).mp3',
-     'stems': HOME / 'Desktop' / 'mydaiarytoyou!' / 'Wrong Turn'},
+     'stems': DESKTOP / 'Wrong Turn'},
 ]
-CACHE = HOME / '.config' / 'deconstruct-audio' / 'cache'
+
+
+def cache_root():
+    """Honour DECONSTRUCT_AUDIO_CONFIG_DIR, which relocates the whole dir."""
+    override = os.environ.get('DECONSTRUCT_AUDIO_CONFIG_DIR')
+    base = Path(override) if override else HOME / '.config' / 'deconstruct-audio'
+    return base / 'cache'
 
 
 def stable(sheet_a, sheet_b):
@@ -1384,41 +2012,55 @@ def stable(sheet_a, sheet_b):
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
+def slug(name):
+    return name.lower().replace(',', '').replace(' ', '-')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rerun', action='store_true',
                         help='Measure each track twice and compare.')
-    parser.add_argument('--out', type=Path, default=None,
-                        help='Write each track\'s facts.json here.')
+    parser.add_argument('--out', type=Path, default=None)
     args = parser.parse_args()
 
-    held = 0
+    held, checked = 0, 0
     for track in CORPUS:
         if not track['audio'].exists():
-            print(f'TRACK={track["name"]} STABLE=no MISSING={track["audio"]}')
+            print(f'TRACK={track["name"]} STABLE=missing PATH={track["audio"]}')
             continue
         first = facts_mod.fact_sheet(track['audio'], stems_dir=track['stems'],
-                                     cache_root=CACHE)
+                                     cache_root=cache_root())
         if args.rerun:
             second = facts_mod.fact_sheet(track['audio'],
                                           stems_dir=track['stems'],
-                                          cache_root=CACHE)
+                                          cache_root=cache_root())
             ok = stable(first, second)
+            checked += 1
+            held += 1 if ok else 0
+            state = 'yes' if ok else 'no'
         else:
-            ok = True
-        held += 1 if ok else 0
-        print(f'TRACK={track["name"]} STABLE={"yes" if ok else "no"} '
-              f'{json.dumps(facts_mod.scorable(first), sort_keys=True)}')
+            # Never print yes for something nothing compared. Revision 1 did,
+            # and a run without the flag reported CORPUS_STABLE=3/3 having
+            # compared nothing at all.
+            state = 'unchecked'
+        projected = facts_mod.scorable(first)
+        unresolved = sorted(a for a, e in first['facts'].items()
+                            if e['confidence'] == 'UNKNOWN')
+        print(f'TRACK={track["name"]} STABLE={state} '
+              f'SCORABLE={json.dumps(projected, sort_keys=True)} '
+              f'UNRESOLVED={",".join(unresolved) or "none"}')
         if args.out:
             args.out.mkdir(parents=True, exist_ok=True)
-            slug = track['name'].lower().replace(',', '').replace(' ', '-')
-            (args.out / f'facts-{slug}.json').write_text(
+            (args.out / f'facts-{slug(track["name"])}.json').write_text(
                 json.dumps(first, indent=2, allow_nan=False), encoding='utf-8')
-            (args.out / f'scorable-{slug}.json').write_text(
-                json.dumps(facts_mod.scorable(first), indent=2, allow_nan=False),
+            (args.out / f'scorable-{slug(track["name"])}.json').write_text(
+                json.dumps(projected, indent=2, allow_nan=False),
                 encoding='utf-8')
-    print(f'CORPUS_STABLE={held}/{len(CORPUS)}')
-    return 0 if held == len(CORPUS) else 2
+    if args.rerun:
+        print(f'CORPUS_STABLE={held}/{len(CORPUS)}')
+        return 0 if held == len(CORPUS) else 2
+    print(f'CORPUS_STABLE=unchecked/{len(CORPUS)}')
+    return 0
 
 
 if __name__ == '__main__':
@@ -1428,25 +2070,48 @@ if __name__ == '__main__':
 - [ ] **Step 3: Run the corpus**
 
 ```bash
-/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python scripts/corpus_check.py --rerun \
-  --out /Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17/evidence
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
+.venv/bin/python scripts/corpus_check.py --rerun --out $DESK/evidence
 ```
 Expected: `CORPUS_STABLE=3/3`
 
-- [ ] **Step 4: Score the reference against its known values**
+- [ ] **Step 4: Score the reference against its known values. This is the entry bar.**
 
 ```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
 DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
-/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python scripts/deconstruct.py \
-  compare $DESK/evidence/known-murder-she-wrote.json \
-          $DESK/evidence/scorable-murder-she-wrote.json
+.venv/bin/python scripts/deconstruct.py compare \
+  $DESK/evidence/known-murder-she-wrote.json \
+  $DESK/evidence/scorable-murder-she-wrote.json
 ```
-Expected: `VERDICT=PASS`
 
-This is the entry bar. If an axis fails, report the actual delta rather than
-adjusting the gate. The gates in `compare` were set by the parent spec and
-moving one to turn a failure into a pass is the single most damaging thing that
-can be done to this project.
+Expected, **both lines**:
+
+```
+MEASURED=5 UNMEASURED=3
+VERDICT=PASS
+```
+
+**`MEASURED=5` is not decoration and it is not optional.** `compare` computes
+its verdict only from axes present on both sides, and `scorable` omits any axis
+graded `UNKNOWN`. Without this assertion, a sheet that graded tempo, key,
+tuning and intro `UNKNOWN` would project nothing, `compare` would find nothing
+to disagree about, and `VERDICT=PASS` would print over a sheet that measured
+nothing. The critic demonstrated this against the repo's own existing test. If
+you see `VERDICT=PASS` with `MEASURED` below 5, the bar is not met and the
+correct report is that it is not met.
+
+The three unmeasured axes are `section_count`, `low_end_share` and
+`lead_register_midi`, each absent from the known values for a reason stated in
+Step 1.
+
+**If an axis fails, report the actual delta. Do not move a gate, do not
+re-grade the axis `UNKNOWN`, and do not change the measurement definition until
+the number lands inside an existing gate.** All three are ways of manufacturing
+a pass, and the third is the one this project came closest to doing: the low end
+axis had a reading available that cleared the gate by 0.14 points and it was
+rejected for exactly that reason.
 
 - [ ] **Step 5: Commit**
 
@@ -1465,7 +2130,7 @@ git commit -m "feat: run the corpus twice and prove the sheet holds still"
 
 - [ ] **Step 1: Add `facts` to the command table in `README.md`**
 
-In the command table, after the `tempo` row:
+After the `tempo` row:
 
 ```markdown
 | `facts <file>` | Measures every axis on the stem that carries it and writes a fact sheet where each value states its method, its frequency band and a confidence grade. `--stems DIR` adopts an existing six stem folder instead of separating |
@@ -1482,25 +2147,49 @@ And in the code block above the table:
 ```markdown
 `facts` is the measurement path's output. It reads each property from the stem
 that carries it, declares the frequency band it read, and grades every value
-`KNOW`, `INFER` or `UNKNOWN`. A value the pipeline could not resolve is emitted
-as `UNKNOWN` rather than filled in, and constructing a fact without a method or
-a grade raises rather than producing one. `scorable.json` beside it projects the
-sheet onto the axes `compare` scores, so a reference and a candidate go through
-the same projection and cannot be compared on different terms by accident.
+`KNOW`, `INFER` or `UNKNOWN`. Constructing a fact without a method or a grade
+raises rather than producing one, so an ungraded number cannot reach the sheet.
+
+`UNKNOWN` means a method was tried and did not resolve, and the note says which
+methods. Section count is the standing example: sixteen segmentation methods
+were run against a three track corpus and none generalised, so the sheet emits
+section boundaries and refuses to state a count. A number that is about half
+likely to be wrong is worse than no number, because a stated number invites
+downstream use that a missing one does not.
+
+`scorable.json` beside the sheet projects it onto the axes `compare` scores, so
+a reference and a candidate go through the same projection and cannot be
+compared on different terms by accident. An `UNKNOWN` axis is left out of that
+projection, which means a `PASS` from `compare` must always be read next to its
+`MEASURED=` count.
 ```
 
-- [ ] **Step 3: Add the command to `SKILL.md`**
+- [ ] **Step 3: Add two entries to the "Limits worth knowing" list in `README.md`**
 
-Follow the format the existing commands use in that file, describing `facts`,
-its `--stems` flag, and the rule that the agent never promotes an `UNKNOWN` axis
-to a stated fact when writing prose from the sheet.
+```markdown
+- **Section count is not measured.** Boundaries are. Sixteen structure
+  segmentation methods failed to generalise across a three track corpus, so the
+  sheet reports `UNKNOWN` for the count rather than a number it has not earned.
+- **Low end share is a pinned definition, not a universal one.** It is the per
+  frame mean magnitude share below 150 Hz at `n_fft` 2048, mono, 22050 Hz. Eight
+  defensible readings of the same phrase span 10.8 to 58.0 percent on one track,
+  so a figure from another tool is not comparable to this one. Both sides of a
+  comparison run through this function or the comparison means nothing.
+```
 
-- [ ] **Step 4: Run the full suite one more time**
+- [ ] **Step 4: Add the command and its rules to `SKILL.md`**
+
+Follow the format the existing commands use in that file. State the `--stems`
+flag, and state the rule that binds the agent: never promote an `UNKNOWN` axis
+to a stated fact when writing prose from the sheet, and always read a `compare`
+verdict next to its `MEASURED` count.
+
+- [ ] **Step 5: Run the full suite one more time**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`
 Expected: OK
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add README.md SKILL.md
@@ -1511,28 +2200,40 @@ git commit -m "docs: the facts command"
 
 ## Self-Review
 
-**Spec coverage.** The Fact object is Task 1. Stem adoption, which the corpus
-needs, is Task 2. The axes table is Tasks 3, 4 and 5, with band declarations
-carried on every fact. The projection onto compare is Task 5. The tuning axis
-compare was missing is Task 6. The command is Task 7. The entry bar, meaning the
-corpus rerun and the score against known values, is Task 8. Documentation is
-Task 9.
+**Spec coverage.** The Fact object is Task 1. Stem adoption is Task 2. The
+measurement axes are Tasks 3, 4 and 5, with the band declared on every fact that
+reads one. The projection onto compare is Task 5. The tuning axis compare was
+missing, and the four existing assertions it moves, are Task 6. The command is
+Task 7. The entry bar is Task 8. Documentation is Task 9.
 
-Not covered here by design, because each has its own plan and its own worktree:
-the MIDI emitter, the research branch and the Brain wiring.
+Two spec axes changed shape and both are argued in the plan body rather than
+quietly dropped: `section_count` is `UNKNOWN` with its evidence, and
+`low_end_share` has a pinned definition and moves from the entry bar to the exit
+bar. One axis was added that the spec did not have, `instrumentation`, because
+the parent spec's "six stems, all non-silent" gate would fail a correct
+separation of a track with no piano.
 
-**Placeholders.** Task 5 describes eleven axis builders in prose rather than
-giving each one's body. That is a deliberate and declared boundary, not a
-placeholder: each builder's interface, grading rule, stem, band and method list
-is stated exactly, and the `fact()` contract from Task 1 makes a wrong one fail
-loudly. The numeric thresholds that cannot be known before measuring real audio,
-`THIRD_RATIO` in Task 4 and the intro density rule in Task 5, are called out as
-measure-then-set steps with an explicit instruction not to loosen an assertion
-instead.
+Not covered here by design, each with its own plan and worktree: the MIDI
+emitter, the research branch, the Brain wiring.
 
-**Type consistency.** `fact()` returns the dict every axis builder returns and
-`render_markdown` and `scorable` read. `adopt_stems` returns `dict[str, Path]`,
-the same shape `stems.separate` returns, so `fact_sheet` consumes either without
-branching beyond the origin label. `chord_sequence` entries carry `third_present`,
-which Task 4 tests and the MIDI plan consumes. `PROJECTION` targets are checked
-against `compare.GATES` by a test rather than by eye.
+**Placeholders.** Task 5 gives every axis builder's body. Revision 1 described
+eleven of them in prose and the critic found that one, `_harmonic_rhythm_fact`,
+was called but never specified at all, and that `_register` did not match the
+calling convention it was wired into. Both are written out here. The two
+numeric constants that cannot be known before measuring real audio,
+`THIRD_RATIO` and `ACTIVE_DB`, are called out as measure-then-set with an
+explicit instruction not to loosen an assertion instead, and `ACTIVE_DB` is
+additionally shown to be insensitive across a 10 dB spread.
+
+**Type consistency.** Every axis builder has the signature
+`(paths, loaded, mix, sr, local, built) -> dict` and is invoked through
+`BUILDERS`, so a wrong arity is a `TypeError` at the first run rather than a
+silent miswire. `_register` is a helper with its own signature and is called
+only by the two register builders. `band_limit` is always reached as
+`chords_mod.band_limit(y, sr, low, high)`; revision 1 called it with three
+arguments and no `sr`. `adopt_stems` and `stems.separate` both return
+`dict[str, Path]`, so `fact_sheet` consumes either without branching beyond the
+origin label. `chord_sequence` entries carry `third_present`, which Task 4 tests
+and the MIDI plan consumes. `PROJECTION` targets are checked against
+`compare.GATES` by a test rather than by eye. `built` is read by four builders
+and each guards for a missing or `UNKNOWN` predecessor rather than assuming one.
