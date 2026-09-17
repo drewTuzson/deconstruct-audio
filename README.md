@@ -201,8 +201,12 @@ is how you record the answer once a human has given it:
 prompt facts.json --tempo-level 161.5
 ```
 
-You may only select a value the measurement itself reported, which is the primary
-or a member of its family. Anything else is refused and the message names every
+You may only select a value the measurement itself reported: the primary on the
+`tempo` axis, or a member of the `tempo_family` axis beside it. That second axis
+carries the metrical levels the same drums measurement found, each with its
+ratio, the method that produced it and its relative strength where there is one.
+It is graded exactly as `tempo` is and is never used to build a prompt phrase
+directly; a level chosen from it reaches a prompt through `tempo`. Anything else is refused and the message names every
 selectable value, because a BPM nobody measured must not become a slot the prompt
 is then allowed to state. The choice is echoed as
 `TEMPO_LEVEL=161.5 SOURCE=family 2x` and recorded in `slots.json` with the level's
@@ -268,7 +272,7 @@ If you already own SunoGPT's Brain, `connect-brain` saves a pointer to your loca
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The 355 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
+The 358 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
 
 The release in this repository is the revision its author ran end to end on macOS. The Windows and Linux code paths are written and covered by mocked tests, but have not been exercised on those operating systems.
 

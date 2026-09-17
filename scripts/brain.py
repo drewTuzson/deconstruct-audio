@@ -366,52 +366,30 @@ HOLD_OUT_CHOICES = ('tempo', 'tuning', 'intro_seconds', 'lead_register',
 # 161, 161.5 and 162 all resolve to the 2x member, and 160 resolves to nothing.
 TEMPO_MATCH_BPM = 0.5
 
-# The shape tempo.py writes a competing level in. Ratio labels are '2x' style
-# or '4/3' style; see RATIOS there.
-_TEMPO_LEVEL = re.compile(
-    r'([\d.]+x|\d+/\d+)\s+at\s+([\d.]+)\s+BPM'
-    r'(?:\s*\(tempogram relative strength\s+([\d.]+)\))?')
-
-
-def _decimal(token):
-    r"""A number written as text, or None.
-
-    The note is prose, so `[\d.]+` can hand back something like '1.2.3' that
-    float() refuses. A number this cannot read is a level that is not offered,
-    never a ValueError for the top level handler to suppress.
-    """
-    if not token:
-        return None
-    try:
-        return _number(float(token))
-    except (TypeError, ValueError):
-        return None
-
-
-def tempo_levels(entry):
-    """Every BPM this tempo fact reported, with how the measurement labelled it.
+def tempo_levels(tempo, family):
+    """Every BPM this measurement reported, with how it labelled each one.
 
     The selectable set, and the reason the flag can be trusted: a level is
-    offered only because the measurement put it in this fact, never because a
+    offered only because the measurement put it in this sheet, never because a
     ratio of the primary would be plausible.
 
-    It is recovered from the fact's `note`, which is where the family ends up.
-    `tempo.grade` builds a structured family with a bpm, a ratio and a relative
-    strength for each member, and `facts._tempo_fact` keeps only the primary
-    and the prose, so the note is the only form of the family that reaches a
-    fact sheet. Parsing our own generated sentence is the narrow reading of
-    what the sheet actually contains; carrying the structured family through
-    `fact()` instead would be better and is a change to facts.py rather than
-    to this module.
+    It reads the `tempo_family` axis, which carries the family as data. The
+    first version read `tempo`'s note instead, because the family reached a
+    sheet only as prose: `tempo.grade` built it with a bpm, a ratio and a
+    method per member and the fact boundary kept just the primary and the
+    sentence. Parsing a sentence we generated from structured data and then
+    discarded is the shape this project refuses, and it was not only untidy.
+    On two of the three corpus tracks that prose names its ratios without their
+    BPMs, so those levels could not be recovered at all and the flag refused
+    values the measurement had reported.
 
-    One branch of that prose names its ratios without their BPMs. Those levels
-    are then not offered, which refuses a value the measurement did report.
-    That is the safe direction, and `select_tempo_level` says so rather than
-    implying the family was empty.
+    A member carrying no bpm even here stays unselectable, and
+    `select_tempo_level` says how many were dropped rather than quietly
+    shortening the list.
     """
-    if not isinstance(entry, dict):
+    if not isinstance(tempo, dict):
         return []
-    primary = _number(entry.get('value'))
+    primary = _number(tempo.get('value'))
     if primary is None:
         # No primary means the axis is UNKNOWN, and a family hanging off an
         # unmeasured tempo is not a set anyone may select from. Offering one
@@ -420,18 +398,31 @@ def tempo_levels(entry):
         return []
     levels = [{'bpm': primary, 'source': 'primary', 'relative_strength': None}]
     seen = {primary}
-    for ratio, bpm, strength in _TEMPO_LEVEL.findall(
-            _text(entry.get('note')) or ''):
-        value, rel = _decimal(bpm), _decimal(strength)
-        if value is None or value in seen:
+    members = family.get('value') if isinstance(family, dict) else None
+    for member in members if isinstance(members, list) else []:
+        if not isinstance(member, dict):
             continue
-        seen.add(value)
-        levels.append({'bpm': value, 'source': f'family {ratio}',
-                       'relative_strength': rel})
+        bpm = _number(member.get('bpm'))
+        if bpm is None or bpm in seen:
+            continue
+        seen.add(bpm)
+        label = (_text(member.get('ratio')) or _text(member.get('method'))
+                 or 'member')
+        levels.append({'bpm': bpm, 'source': f'family {label}',
+                       'relative_strength': _number(
+                           member.get('relative_strength'))})
     return levels
 
 
-def select_tempo_level(entry, wanted):
+def _unreadable_members(family):
+    """How many family members carry no usable bpm."""
+    members = family.get('value') if isinstance(family, dict) else None
+    return sum(1 for member in (members if isinstance(members, list) else [])
+               if not isinstance(member, dict)
+               or _number(member.get('bpm')) is None)
+
+
+def select_tempo_level(tempo, family, wanted):
     """The measured level a human chose, or a refusal naming every option.
 
     The whole rule of this flag: a value may be selected only because the
@@ -442,7 +433,7 @@ def select_tempo_level(entry, wanted):
     target = _number(wanted)
     if target is None:
         raise BrainError(f'{wanted!r} is not a tempo in BPM.')
-    levels = tempo_levels(entry)
+    levels = tempo_levels(tempo, family)
     if not levels:
         raise BrainError(
             'This sheet reports no usable tempo, so there is no level to '
@@ -461,18 +452,23 @@ def select_tempo_level(entry, wanted):
         return dict(min(hits, key=lambda level: abs(level['bpm'] - target)))
     offered = ', '.join(f'{level["bpm"]} ({level["source"]})'
                         for level in levels)
-    # Say WHY the set is thin, but only when it actually is: a note that names
-    # ratios and no BPM has a family the sheet did not carry, which is a
-    # different situation from a tempo that simply has no competing level.
-    # Claiming the first whenever the set is small would be a confident
-    # explanation of something that never happened.
-    note = _text(entry.get('note')) or ''
-    ratios_only = (len(levels) == 1
-                   and re.search(r'[\d.]+x|\d+/\d+', note)
-                   and not _TEMPO_LEVEL.search(note))
-    thin = ('; this sheet\'s tempo note names its competing levels by ratio '
-            'with no BPM, so the family did not reach the sheet and only the '
-            'primary can be offered from it' if ratios_only else '')
+    # Say WHY the set is thin, but only when it actually is. Two different
+    # situations look alike from here and neither may be guessed at: a sheet
+    # written before this axis existed carries no family at all, and a family
+    # whose members lack a bpm carries one this cannot read. A tempo that
+    # simply has no competing level is neither, and claiming otherwise
+    # whenever the set is small would be a confident explanation of something
+    # that never happened.
+    dropped = _unreadable_members(family)
+    if family is None:
+        thin = ('; this sheet has no tempo_family axis, so it predates the '
+                'axis that carries the family. Rerun facts to select a level '
+                'other than the primary')
+    elif dropped:
+        thin = (f'; {dropped} family member(s) carry no readable bpm and are '
+                f'not selectable')
+    else:
+        thin = ''
     raise BrainError(
         f'{target} BPM is not a level this measurement reported. Selectable: '
         f'{offered}{thin}. Only a value the measurement itself reported may '
@@ -533,7 +529,8 @@ def slots(sheet, hold_out=None, tempo_level=None):
     # measurement reported. select_tempo_level raises rather than falling back,
     # because a BPM that resolved to nothing must never reach a slot: a slot is
     # exactly what numbers_trace will later certify as traced to the sheet.
-    chosen = select_tempo_level(tempo, tempo_level) if (
+    family = _usable(sheet, 'tempo_family')
+    chosen = select_tempo_level(tempo, family, tempo_level) if (
         tempo and tempo_level is not None) else None
     beats = _number(tempo.get('value')) if tempo else None
     if chosen is not None:

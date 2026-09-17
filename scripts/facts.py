@@ -337,12 +337,59 @@ def _register(y, sr, fmin, fmax, stem, band, actionable):
                      'octave errors are common in this band')
 
 
+TEMPO_METHODS = ['tempogram-peak', 'beat-track', 'inter-onset']
+
+
+def _tempo_family_fact_from(result):
+    """Every metrical level this measurement reported besides the primary.
+
+    A sibling axis rather than a field on `tempo`, following the precedent
+    `section_count` and `section_boundaries` already set: one measurement, two
+    axes, because they answer different questions and can carry different
+    confidence. `tempo` keeps the primary as a float, which is what `scorable`
+    projects and the entry bar scores, and this carries the family.
+
+    It exists because the family used to reach a fact sheet only as prose in
+    `tempo`'s note, so anything needing it had to parse a sentence we had
+    generated from structured data and then discarded. On two of the three
+    corpus tracks that prose names its ratios without their BPMs, and those
+    levels were unrecoverable.
+
+    `suno_actionable` is `none`: nothing here reaches a prompt directly. A
+    level chosen from it reaches one through `tempo`.
+    """
+    members = [{'bpm': member.get('bpm'), 'ratio': member.get('ratio'),
+                'method': member.get('method'),
+                'relative_strength': member.get('relative_strength')}
+               for member in (result.get('family') or [])]
+    return fact(members, 'members', 'drums', TEMPO_METHODS,
+                result['confidence'], 'none',
+                note=('Metrical levels the same drums measurement reported '
+                      'besides the primary in tempo. Read to resolve a tempo '
+                      'that is graded INFER; a level chosen here reaches a '
+                      'prompt through tempo, never from this axis.'))
+
+
 def _tempo_fact(paths, loaded, mix, sr, local, built):
     result = tempo_mod.tempo_family(paths['drums'])
     note = result.get('disagreement')
-    return fact(result['primary'], 'bpm', 'drums',
-                ['tempogram-peak', 'beat-track', 'inter-onset'],
+    # The family axis is built HERE, from this same result, and parked for its
+    # own builder to hand back. One tempo_family() call per sheet: a second
+    # would double the drums analysis and, worse, could disagree with this one,
+    # leaving two axes describing one measurement out of step inside a single
+    # sheet. The note is unchanged, because a human reads it and the prompt
+    # command's ASK_FIRST line quotes it.
+    built['tempo_family'] = _tempo_family_fact_from(result)
+    return fact(result['primary'], 'bpm', 'drums', TEMPO_METHODS,
                 result['confidence'], 'direct', note=note)
+
+
+def _tempo_family_fact(paths, loaded, mix, sr, local, built):
+    entry = built.get('tempo_family')
+    if entry is None:
+        raise FactError('tempo_family must be built after tempo, which takes '
+                        'the one measurement both axes report')
+    return entry
 
 
 def _instrumentation_fact(paths, loaded, mix, sr, local, built):
@@ -725,10 +772,13 @@ def _vocal_register_fact(paths, loaded, mix, sr, local, built):
                      'direct')
 
 
-# Order matters and is load bearing in three places: chords reads tempo, key
-# reads chords for its cross check, and intro_seconds reads section_boundaries.
+# Order matters and is load bearing in four places: chords reads tempo, key
+# reads chords for its cross check, intro_seconds reads section_boundaries, and
+# tempo_family is built by _tempo_fact from the one measurement both tempo axes
+# report, then handed back by its own builder.
 BUILDERS = (
     ('tempo', _tempo_fact),
+    ('tempo_family', _tempo_family_fact),
     ('meter', _meter_fact),
     ('instrumentation', _instrumentation_fact),
     ('tuning', _tuning_fact),

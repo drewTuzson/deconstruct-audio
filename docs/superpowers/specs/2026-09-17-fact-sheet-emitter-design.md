@@ -109,6 +109,7 @@ The parent spec's stage 2 table, unchanged, plus tuning promoted to a scored axi
 | Fact | Stem | Band Hz | Method | `suno_actionable` |
 |---|---|---|---|---|
 | `tempo` | drums | full | tempogram, beat track, inter-onset | `direct` |
+| `tempo_family` | drums | full | the same measurement, reported as its competing metrical levels | `none` |
 | `meter` | drums | full | beat grouping autocorrelation | `direct` |
 | `key` | guitar + bass | 150 to 2500 | chroma against major and minor templates, reconciled | `direct` |
 | `chords` | guitar + bass | 150 to 2500 | beat-synchronous chroma, template match | `midi_only` |
