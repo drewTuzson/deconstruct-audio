@@ -381,3 +381,373 @@ def slots(sheet, hold_out=None):
     if key:
         out['midi_only'].append(f'key, {key["value"]}, supplied as MIDI')
     return out
+
+
+HYPHEN_EXCEPTIONS = re.compile(
+    r'\b[A-Z]-[A-Za-z]+\b'          # letter prefix genres such as J-Pop
+    r'|\[[^\]]*\]')                 # bracketed tags
+INSTRUMENTAL_EXEMPTION = 'fully instrumental, no vocals'
+SENTENCE = re.compile(r'[.!?](?:\s|$)')
+PROSE_MIN_SENTENCES = 2
+MOODS_FRACTION = 0.6   # BPM must appear inside the first 60 percent of the tags
+
+
+def _result(name, verdict, detail=''):
+    return {'check': name, 'verdict': verdict, 'detail': detail}
+
+
+def _found_words(text, words):
+    low = text.lower()
+    return [w for w in words if re.search(rf'\b{re.escape(w)}\b', low)]
+
+
+def slot_numbers(filled):
+    """Every number that appears in a slot phrase.
+
+    The traceable set is the SLOTS, not the facts. Three reasons, and the
+    second one is a measured defect rather than a preference.
+
+    The prompt is supposed to be written from slots.json. Tracing against the
+    slots is therefore the same question as 'did this come from the fact
+    sheet', which is the claim the exit bar makes and could not previously
+    check.
+
+    The earlier version traced against the facts AND blessed the double and the
+    half of every one of them. On a track measured at 80.7 that made 161 a
+    traceable number, which is the exact 2x metrical level this track reports
+    at relative strength 0.90: the one wrong tempo most likely to be written,
+    waved through by the check meant to catch it. Across the integers 10 to
+    200, 19.45 percent traced by coincidence.
+
+    And it skipped single digit numbers entirely, so a prompt could say
+    '7 sections' on a sheet whose section count is UNKNOWN.
+    """
+    out = set()
+    for key in SLOT_KEYS:
+        for phrase in filled.get(key, []):
+            for token in re.findall(r'\d+', str(phrase)):
+                out.add(int(token))
+    return out
+
+
+# A boundary worth naming rather than discovering later. Tracing against the
+# slots moves the trust boundary one step: a number the SLOT BUILDER invented
+# now traces to itself. The fallback direction sentence is the live instance.
+# It says "its longest unbroken stretch runs about 38 seconds", 38 is a
+# difference between two measured boundaries rather than a measured value, and
+# it appears nowhere in facts.json yet traces cleanly.
+#
+# That is acceptable and it is not nothing. The slot builder is code in this
+# repository with tests, which is a different class of thing from a sentence an
+# agent wrote. The check answers "did this come from the fact sheet, through
+# code we own", not "is this number in facts.json". Anyone adding a slot phrase
+# that computes a number is extending what the prompt may say, and should say
+# so in the pull request.
+
+
+def _canonical(text):
+    """One spelling for comparison.
+
+    Not a prefix: a prefix match let a phrase be counted as inherited and then
+    inverted, so 'roughly 12 seconds of build' and 'roughly 12 minutes of total
+    silence' both scored as coming from the same measurement.
+    """
+    return ' '.join(str(text).lower().replace('.', ' ').split())
+
+
+def _decompose(style):
+    """The style as the Brain's own format defines it: a comma separated tag
+    stack, then direction prose in sentences."""
+    parts = list(SENTENCE.split(style))
+    head = parts[0] if parts else ''
+    tags = [t.strip() for t in head.split(',') if t.strip()]
+    sentences = [s.strip() for s in parts[1:] if s.strip()]
+    return tags, sentences
+
+
+def validate(style, exclude, sheet, rules, mode='custom', names=(),
+             filled=None, acknowledged=False, declared=(), dropped=()):
+    """Check a composed prompt against the Brain's own rules.
+
+    `filled` is the slots dict the prompt was supposed to be written from. It
+    is an argument rather than recomputed here so the caller checks the SAME
+    slots it handed the agent, including any held out axis.
+
+    `dropped` is checked against a budget, not taken on trust. See the
+    allowance below.
+    """
+    if filled is None:
+        filled = slots(sheet)
+    results = []
+    style = style or ''
+    exclude = exclude or ''
+    body = style.lower()
+
+    # Budget. `cap` is read here and reused by the provenance drop allowance
+    # below, because a drop can only be justified against the cap that forced
+    # it.
+    budget = rules['budgets'].get(mode, {})
+    cap, target = budget.get('cap'), budget.get('target')
+    if cap is UNREADABLE or cap is None:
+        results.append(_result(
+            'budget', 'UNKNOWN',
+            f'no budget for {mode} could be read from the Brain'))
+    else:
+        length = len(style)
+        if length > cap:
+            results.append(_result(
+                'budget', 'FAIL',
+                f'{length} characters over the hard cap of {cap}'))
+        elif (target and target is not UNREADABLE
+                and not target[0] <= length <= target[1]):
+            results.append(_result(
+                'budget', 'FAIL',
+                f'{length} characters outside the target {target[0]} to '
+                f'{target[1]}'))
+        else:
+            results.append(_result('budget', 'PASS', f'{length} characters'))
+
+    # Negation, in the style
+    searchable = body.replace(INSTRUMENTAL_EXEMPTION, ' ')
+    hits = _found_words(searchable, NEGATION_WORDS)
+    results.append(_result('negation', 'FAIL' if hits else 'PASS',
+                           ', '.join(hits)))
+
+    # Negation, in the exclude field
+    exclude_hits = _found_words(exclude, NEGATION_WORDS)
+    results.append(_result('exclude_negation',
+                           'FAIL' if exclude_hits else 'PASS',
+                           ', '.join(exclude_hits)))
+
+    # Hyphens
+    stripped = HYPHEN_EXCEPTIONS.sub(' ', style)
+    stray = re.findall(r'\b\w+-\w+\b', stripped)
+    results.append(_result('hyphens', 'FAIL' if stray else 'PASS',
+                           ', '.join(stray)))
+
+    # Banned words and phrases
+    for key in ('banned_words', 'banned_phrases'):
+        rule = rules.get(key)
+        if rule is UNREADABLE:
+            results.append(_result(
+                key, 'UNKNOWN', f'{key} could not be read from the Brain'))
+            continue
+        if key == 'banned_words':
+            hits = _found_words(body, rule)
+        else:
+            hits = [p for p in rule if p in body]
+        results.append(_result(key, 'FAIL' if hits else 'PASS',
+                               ', '.join(hits)))
+
+    # Direction prose
+    sentences = [s for s in SENTENCE.split(style)
+                 if len(s.strip().split()) >= 5]
+    results.append(_result(
+        'direction_prose',
+        'PASS' if len(sentences) >= PROSE_MIN_SENTENCES else 'FAIL',
+        f'{len(sentences)} prose sentences of five words or more'))
+
+    # BPM placement
+    bpm_at = body.find('bpm')
+    if bpm_at < 0:
+        results.append(_result('bpm_placement', 'FAIL',
+                               'no BPM anywhere in the style'))
+    else:
+        first_sentence = SENTENCE.split(style)[0]
+        limit = len(first_sentence) * MOODS_FRACTION
+        results.append(_result(
+            'bpm_placement', 'PASS' if bpm_at <= limit else 'FAIL',
+            f'BPM at character {bpm_at} of a {len(first_sentence)} character '
+            f'tag stack'))
+
+    # Every number traces to a slot phrase. Every number, including single
+    # digits, which the earlier \d{2,4} pattern never looked at.
+    traceable = slot_numbers(filled)
+    quoted = {int(n) for n in re.findall(r'\d+', style)}
+    orphans = sorted(n for n in quoted if n not in traceable)
+    results.append(_result(
+        'numbers_trace', 'FAIL' if orphans else 'PASS',
+        f'orphans {orphans}' if orphans
+        else f'{len(quoted)} numbers, all traced to a slot'))
+
+    # Provenance, as a contract rather than a coincidence counter.
+    #
+    # The first version asked whether ANY slot phrase appeared in the style. A
+    # style about a converted grain silo, sharing a single token with the
+    # sheet, passed all thirteen checks including 'provenance 1 of 7 present'.
+    # Worse, it was not independent: bpm_placement mandates the exact phrase
+    # that satisfied it, so provenance certified what two other checks had
+    # already required and added nothing.
+    #
+    # The rule now runs the other way. Every piece of the style must be
+    # accounted for: it either matches a slot phrase, which means it came from
+    # a measurement, or the agent declared it as its own judgement. Anything
+    # else is undeclared content and the prompt fails.
+    #
+    # That makes the composer enumerate its judgement calls, which is the
+    # point. A genre, a subgenre and an era are judgement and belong in
+    # `declared`. A register, a tuning and a BPM are measurements and belong in
+    # the slots. A prompt is then exactly slots plus declared additions, and
+    # "written from the fact sheet alone" becomes a thing a reader can check.
+    slot_phrases = {_canonical(p) for key in SLOT_KEYS
+                    for p in filled.get(key, [])}
+    spoken = {_canonical(d) for d in declared}
+    tags, sentences = _decompose(style)
+    pieces = ([(t, _canonical(t)) for t in tags]
+              + [(s, _canonical(s)) for s in sentences])
+
+    # Four buckets, and a piece lands in exactly one of them. The earlier
+    # version had two and a membership test that ignored `spoken`, so a
+    # DECLARED piece still counted as coming from a measurement. Declaring
+    # every piece including the BPM then passed, because the BPM matched a slot
+    # and the severance guard only fired when NOTHING matched. That is the
+    # mirror of the defect it replaced: bpm_placement mandates a BPM that
+    # traces to a slot, so `81 BPM` is in every passing prompt by construction,
+    # and it was single handedly disabling the severance test.
+    #
+    # A declared piece is judgement BY THE AGENT'S OWN ACCOUNT. Taking that at
+    # face value is the safe reading: an agent that disowns every measured
+    # phrase has told you its prompt carries no measurements, and the check
+    # should agree with it rather than overrule it.
+    from_slots, contested, judgement, undeclared = [], [], [], []
+    for raw, key in pieces:
+        in_slots, was_declared = key in slot_phrases, key in spoken
+        if in_slots and was_declared:
+            contested.append(raw)
+        elif in_slots:
+            from_slots.append(raw)
+        elif was_declared:
+            judgement.append(raw)
+        else:
+            undeclared.append(raw)
+
+    # The other direction. Accounting for every piece of the STYLE is only
+    # half a contract: a prompt using one slot phrase and honestly declaring
+    # four inventions satisfied it while leaving six measurements on the floor.
+    # So every slot phrase must also be accounted for, by appearing in the
+    # style or by being named in `dropped`.
+    #
+    # Dropping is legitimate and common: the Custom budget is 1000 characters
+    # and the slots will not always fit. Naming what was dropped costs the
+    # agent one flag and turns "the measurements did not reach the prompt" from
+    # something a reader has to notice into something the check says.
+    shed = {_canonical(d) for d in dropped}
+    present = {key for _, key in pieces}
+    unused = sorted(p for p in slot_phrases
+                    if p not in present and p not in shed)
+
+    # A drop must be FORCED, and forced by the measurements alone.
+    #
+    # Without this, the obligation the dropped list creates is discharged by
+    # restating it: paste every slot phrase into --dropped and an 859 character
+    # prompt about a converted grain silo, carrying one number from the sheet
+    # and fourteen declared inventions, passes all thirteen checks.
+    #
+    # The intuitive guard does not work and was tried first. "Would it have
+    # fitted" reads as forced whenever the agent filled the budget with its own
+    # prose before dropping anything: style 824 plus dropped 317 against a cap
+    # of 1000 looks like an overflow and is nothing of the kind. Any rule that
+    # measures the drop against the FINISHED style dies to the exact move that
+    # creates the problem.
+    #
+    # So a drop must be MINIMAL: putting any one dropped phrase back would
+    # still overflow the cap. This replaces an allowance expressed in
+    # characters, which needed a model of how phrases are joined and could
+    # never be spent exactly because drops are whole phrases. Both problems go
+    # away when the question is asked one phrase at a time: the separator only
+    # has to be right at a single phrase margin, and there is no remainder to
+    # leave on the table.
+    #
+    # It keeps the property that made the allowance work, which is that the
+    # measurement is taken from `filled` and never from the finished style. A
+    # rule that measured the drop against what the agent actually wrote reads
+    # as forced whenever the agent filled the budget with its own prose first,
+    # and that is the exact move this is defending against.
+    phrases = [p for key in SLOT_KEYS for p in filled.get(key, [])]
+
+    def _rendered(items):
+        # Tags join with ', ' and sentences with ' ', since a sentence already
+        # carries its stop. Two is the wider of the two and this only has to be
+        # right at a one phrase margin.
+        return sum(len(i) for i in items) + max(0, len(items) - 1) * 2
+
+    kept = [p for p in phrases if _canonical(p) not in shed]
+    dropped_phrases = [p for p in phrases if _canonical(p) in shed]
+    dropped_chars = sum(len(p) for p in dropped_phrases)
+    if cap is UNREADABLE or cap is None:
+        restorable = None
+    else:
+        restorable = [p for p in dropped_phrases
+                      if _rendered(kept + [p]) <= int(cap)]
+
+    measured_chars = sum(len(raw) for raw in from_slots)
+    declared_chars = sum(len(raw) for raw in judgement)
+    note = (f'{len(from_slots)} from measurements, {len(judgement)} declared '
+            f'as judgement, {len(contested)} declared but matching a measured '
+            f'slot, {len(undeclared)} unaccounted, {len(unused)} slot phrases '
+            f'silently unused; {measured_chars} characters measured against '
+            f'{declared_chars} declared')
+    if undeclared:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. Traces to neither a measurement nor a declared '
+            f'judgement: {undeclared}'))
+    elif not from_slots:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. Not one piece came from a measurement the agent did not '
+            f'also claim as its own, so nothing connects this prompt to the '
+            f'fact sheet'
+            + (f'. Declared but measured: {contested}' if contested else '')))
+    elif unused:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. Measured and left out without being dropped: {unused}'))
+    elif dropped_phrases and restorable is None:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. {dropped_chars} characters of measurement were dropped '
+            f'and the budget could not be read, so nothing can justify them'))
+    elif restorable:
+        results.append(_result(
+            'provenance', 'FAIL',
+            f'{note}. The drop is not minimal: {restorable} would fit inside '
+            f'the {cap} character cap alongside everything kept, so it was not '
+            f'forced. Measurements have priority over judgement for this '
+            f'budget'))
+    else:
+        results.append(_result('provenance', 'PASS', note))
+
+    # An INFER tempo that nobody acknowledged must not reach a generation.
+    pending = filled.get('ask_first') or []
+    if pending and not acknowledged:
+        results.append(_result(
+            'ask_first', 'FAIL',
+            '; '.join(pending) + '. Rerun with --acknowledge once the user has '
+            'answered, or this prompt anchors the generation to a reading the '
+            'sheet itself flagged as a minority.'))
+    elif pending:
+        results.append(_result('ask_first', 'PASS',
+                               f'{len(pending)} acknowledged'))
+    else:
+        results.append(_result('ask_first', 'PASS', 'nothing to ask'))
+
+    # No names
+    both = f'{body} {exclude.lower()}'
+    named = [n for n in names if n and n.lower() in both]
+    results.append(_result('names', 'FAIL' if named else 'PASS',
+                           ', '.join(named)))
+
+    # Exclude budget
+    rule = rules.get('exclude_budget')
+    if rule is UNREADABLE:
+        results.append(_result(
+            'exclude_budget', 'UNKNOWN',
+            'no exclude budget could be read from the Brain'))
+    else:
+        length = len(exclude)
+        results.append(_result(
+            'exclude_budget',
+            'PASS' if rule[0] <= length <= rule[1] else 'FAIL',
+            f'{length} characters against a target of {rule[0]} to {rule[1]}'))
+    return results

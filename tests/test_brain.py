@@ -319,5 +319,344 @@ class SlotTests(unittest.TestCase):
         self.assertEqual(filled['ask_first'], [])
 
 
+SHEET = {'facts': {
+    'tempo': {'value': 80.7, 'unit': 'bpm', 'confidence': 'KNOW',
+              'suno_actionable': 'direct'},
+    'key': {'value': 'F# minor', 'unit': 'name', 'confidence': 'KNOW',
+            'suno_actionable': 'direct'},
+    'sections': {'value': {'count': 7, 'boundaries_s': []}, 'unit': 'count',
+                 'confidence': 'INFER', 'suno_actionable': 'direct'},
+}}
+
+# The style a compliant agent composes from FULL_SHEET's slots: every measured
+# phrase, plus the judgement it declares. Built from its two halves rather than
+# written out once, because the declared list has to name exactly the pieces
+# that are not measurements, and a hand copied pair drifts the moment either
+# side is edited. test_the_fixture_style_really_carries_every_slot_phrase keeps
+# the measured half honest against slots() itself.
+MEASURED_TAGS = ('81 BPM', 'drop C sharp tuned rhythm guitar',
+                 'very low register lead guitar figure', 'heavy low end',
+                 'static harmony')
+MEASURED_SENTENCE = ('The song opens on roughly 12 seconds of build before the '
+                     'full arrangement lands.')
+# BPM sits inside the moods, near the head of the stack, as the Brain requires.
+GOOD_TAGS = ('Rock', 'Post Hardcore', 'defiant', 'urgent', '81 BPM',
+             'drop C sharp tuned rhythm guitar',
+             'very low register lead guitar figure', 'heavy low end',
+             'static harmony', 'thick distorted bass', 'punchy kick drum',
+             'group shout vocals', 'one lead vocalist only',
+             'wide room reverb', 'driving eighth note pulse',
+             'raw analogue warmth', 'tight gated snare',
+             'layered guitar harmonies', 'saturated tape bus',
+             'live room drum bleed', 'blown out chorus energy',
+             'restless forward momentum', 'anthemic final chorus',
+             'dense midrange guitar wall', 'cutting pick attack',
+             'urgent snare rolls', 'close mic vocal grit',
+             'stacked backing shouts', 'muscular bass drive')
+JUDGEMENT_SENTENCES = (
+    'It holds one harmonic centre while the drums thicken underneath it.',
+    'It ends on a stripped final phrase that lets the room ring out.',
+    'The vocal stays front and centre through every chorus.')
+GOOD_STYLE = (', '.join(GOOD_TAGS) + '. ' + MEASURED_SENTENCE + ' '
+              + ' '.join(JUDGEMENT_SENTENCES))
+GOOD_DECLARED = (tuple(t for t in GOOD_TAGS if t not in MEASURED_TAGS)
+                 + JUDGEMENT_SENTENCES)
+GOOD_EXCLUDE = ('bright major key, clean jazz guitar, smooth crooner vocals, '
+                'dance pop production, orchestral strings, spoken word, lo fi '
+                'tape hiss, swing rhythm, acoustic ballad arrangement, '
+                'cheerful major melody')
+
+# A cap that a real overflow can be measured against. The slot phrases render to
+# 191 characters, so a cap of 150 genuinely forces one drop and admits the other
+# five, while the plan's 200 forced nothing: restoring the dropped phrase fitted
+# and the drop read as unjustified. The target starts at 100 so the kept style
+# clears the budget check too, which is what makes the drop branch observable in
+# context rather than behind an unrelated failure.
+NARROW = FIXTURE_INSTRUCTIONS.replace(
+    'HARD limit 1,000 characters, target 850 to 950',
+    'HARD limit 150 characters, target 100 to 150')
+
+
+def rules():
+    return b.extract_rules(FIXTURE_INSTRUCTIONS)
+
+
+def check(results, name):
+    return next(r for r in results if r['check'] == name)
+
+
+class ValidatorTests(unittest.TestCase):
+    def run_it(self, style=GOOD_STYLE, exclude=GOOD_EXCLUDE, **kw):
+        # The default declaration set is the judgement in GOOD_STYLE: the genre
+        # pair, the moods, the vocal tags and the production taste. Measured
+        # phrases are not declared, because they must come from the slots or
+        # fail.
+        kw.setdefault('declared', GOOD_DECLARED)
+        kw.setdefault('filled', b.slots(FULL_SHEET))
+        return b.validate(style, exclude, SHEET, rules(), **kw)
+
+    def test_the_fixture_style_really_carries_every_slot_phrase(self):
+        # The fixture's claim, checked rather than trusted. If slots() changes
+        # its wording, this fails here instead of quietly turning the clean
+        # style into one that no longer accounts for its measurements.
+        filled = b.slots(FULL_SHEET)
+        self.assertEqual(
+            sorted(p for key in b.SLOT_KEYS for p in filled[key]),
+            sorted(MEASURED_TAGS + (MEASURED_SENTENCE,)))
+
+    def test_a_clean_style_passes_every_check_it_can_run(self):
+        results = self.run_it()
+        failed = [r for r in results if r['verdict'] != 'PASS']
+        self.assertEqual(failed, [], failed)
+
+    def test_a_negation_word_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' no falsetto')
+        self.assertEqual(check(results, 'negation')['verdict'], 'FAIL')
+
+    def test_negation_inside_a_longer_word_does_not_trip_it(self):
+        results = self.run_it(style=GOOD_STYLE + ' nocturne, notation, without')
+        detail = check(results, 'negation')['detail']
+        self.assertNotIn('nocturne', detail)
+        self.assertNotIn('notation', detail)
+        self.assertIn('without', detail)
+
+    def test_a_stray_hyphen_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' palm-muted')
+        self.assertEqual(check(results, 'hyphens')['verdict'], 'FAIL')
+
+    def test_a_letter_prefix_genre_keeps_its_hyphen(self):
+        results = self.run_it(style='J-Pop, ' + GOOD_STYLE)
+        self.assertEqual(check(results, 'hyphens')['verdict'], 'PASS')
+
+    def test_a_banned_word_from_the_brain_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' sparkletastic pads')
+        self.assertEqual(check(results, 'banned_words')['verdict'], 'FAIL')
+
+    def test_a_banned_phrase_from_the_brain_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' sort of like a ballad')
+        self.assertEqual(check(results, 'banned_phrases')['verdict'], 'FAIL')
+
+    def test_over_the_hard_cap_fails(self):
+        results = self.run_it(style='a, ' * 400)
+        self.assertEqual(check(results, 'budget')['verdict'], 'FAIL')
+
+    def test_under_the_target_fails_rather_than_passing_quietly(self):
+        results = self.run_it(style='Rock, Post Hardcore, 81 BPM. It opens.')
+        self.assertEqual(check(results, 'budget')['verdict'], 'FAIL')
+
+    def test_a_style_with_no_direction_prose_fails(self):
+        tags_only = ('Rock, Post Hardcore, defiant, urgent, 81 BPM, downtuned '
+                     'rhythm guitar, thick distorted bass, punchy kick drum, '
+                     'group shout vocals, ') * 3
+        results = self.run_it(style=tags_only)
+        self.assertEqual(check(results, 'direction_prose')['verdict'], 'FAIL')
+
+    def test_a_bpm_at_the_tail_fails_because_it_belongs_in_the_moods(self):
+        tail = GOOD_STYLE.replace(', 81 BPM', '') + ' 81 BPM'
+        results = self.run_it(style=tail)
+        self.assertEqual(check(results, 'bpm_placement')['verdict'], 'FAIL')
+
+    def test_a_number_that_traces_to_no_fact_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' 140 BPM')
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'FAIL')
+
+    def test_a_number_that_rounds_from_a_fact_passes(self):
+        results = self.run_it()
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
+
+    def test_a_single_digit_number_is_traced_too(self):
+        # The earlier pattern looked only at runs of two to four digits, so a
+        # prompt could state a section count on a sheet that measured none.
+        results = self.run_it(style=GOOD_STYLE + ' 7 sections')
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'FAIL')
+
+    def test_a_supplied_name_anywhere_in_either_field_fails(self):
+        results = self.run_it(style=GOOD_STYLE + ' like Placeholder Band',
+                              names=('Placeholder Band',))
+        self.assertEqual(check(results, 'names')['verdict'], 'FAIL')
+
+    def test_a_negation_in_the_exclude_field_fails(self):
+        results = self.run_it(exclude='no bright major key, clean jazz guitar')
+        self.assertEqual(check(results, 'exclude_negation')['verdict'], 'FAIL')
+
+    def test_an_exclude_outside_its_budget_fails(self):
+        results = self.run_it(exclude='strings')
+        self.assertEqual(check(results, 'exclude_budget')['verdict'], 'FAIL')
+
+    def test_an_invented_style_sharing_one_phrase_still_fails(self):
+        # The defect this contract replaces. The previous check asked whether
+        # ANY slot phrase appeared, so a style about a converted grain silo
+        # that happened to carry one tag passed all thirteen checks.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box, letterpress clatter. The piece begins in a stairwell '
+                    'and never leaves it. It ends when the tape runs out.')
+        results = self.run_it(style=invented)
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_declared_judgement_passes_and_is_counted_separately(self):
+        results = self.run_it(declared=GOOD_DECLARED)
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'PASS')
+        self.assertIn('declared as judgement', entry['detail'])
+
+    def test_a_style_that_is_entirely_judgement_fails(self):
+        # Declaring everything is the other way to sever the prompt from the
+        # measurements, and it must not be a way through.
+        tags = 'Rock, Post Hardcore, defiant. It opens quietly. It ends loudly.'
+        results = self.run_it(style=tags,
+                              declared=('Rock', 'Post Hardcore', 'defiant',
+                                        'It opens quietly', 'It ends loudly'))
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_declaring_the_measured_phrase_too_does_not_rescue_it(self):
+        # The route that survived the first inversion. bpm_placement mandates a
+        # BPM and numbers_trace mandates it trace to a slot, so '81 BPM' is in
+        # every passing prompt by construction. Counting a DECLARED piece as
+        # coming from a measurement let it disable the severance test single
+        # handedly.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box. The piece begins in a stairwell. It ends when the '
+                    'tape runs out.')
+        results = self.run_it(
+            style=invented,
+            declared=('81 BPM', 'converted grain silo reverb',
+                      'hand cranked music box',
+                      'The piece begins in a stairwell',
+                      'It ends when the tape runs out'))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('declared but matching a measured slot', entry['detail'])
+
+    def test_a_measurement_left_out_without_being_dropped_fails(self):
+        # The symmetric half. Accounting for the style is only half a contract:
+        # one slot phrase plus four honest declarations satisfied the first
+        # version while six measurements sat on the floor.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box. The piece begins in a stairwell. It ends when the '
+                    'tape runs out.')
+        results = self.run_it(
+            style=invented,
+            declared=('converted grain silo reverb', 'hand cranked music box',
+                      'The piece begins in a stairwell',
+                      'It ends when the tape runs out'))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('left out without being dropped', entry['detail'])
+
+    def test_dropping_every_slot_does_not_discharge_the_obligation(self):
+        # The attack that defeated the first symmetric version: paste the whole
+        # slot list into --dropped and an 859 character prompt about a grain
+        # silo, carrying one number from the sheet, passed all thirteen checks.
+        # A drop must be FORCED, and the slots fit with room to spare.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        kept = [p for p in every if 'BPM' in p]
+        results = self.run_it(
+            style=', '.join(kept) + '. It opens quietly. It ends loudly.',
+            filled=filled,
+            declared=('It opens quietly', 'It ends loudly'),
+            dropped=tuple(p for p in every if p not in kept))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('not forced', entry['detail'])
+
+    def test_a_minimal_drop_forced_by_a_real_overflow_is_allowed(self):
+        # The case the flag exists for, at a cap the rest of the checks can
+        # still pass. An earlier version used a cap of 60, where the fixed tail
+        # alone is 36 characters and `budget` could never pass, so it asserted
+        # only `provenance` and proved nothing about the branch in context. A
+        # later one used 200, which the slot phrases fit inside, so no drop was
+        # ever forced and the branch under test was never reached.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        longest = max(every, key=len)
+        kept = [p for p in every if p != longest]
+        narrow = b.extract_rules(NARROW)
+        results = b.validate(', '.join(kept), GOOD_EXCLUDE, SHEET, narrow,
+                             filled=filled, dropped=(longest,))
+        self.assertEqual(check(results, 'provenance')['verdict'], 'PASS')
+        self.assertEqual(check(results, 'budget')['verdict'], 'PASS')
+
+    def test_a_drop_larger_than_the_overflow_needs_is_refused(self):
+        # Minimality is the whole rule. Dropping two phrases when one would
+        # have brought the slots inside the cap is not forced, and the message
+        # names the phrase that should have stayed.
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        two_longest = sorted(every, key=len)[-2:]
+        kept = [p for p in every if p not in two_longest]
+        narrow = b.extract_rules(NARROW)
+        results = b.validate(', '.join(kept), GOOD_EXCLUDE, SHEET, narrow,
+                             filled=filled, dropped=tuple(two_longest))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('not minimal', entry['detail'])
+
+    def test_a_drop_with_an_unreadable_budget_cannot_be_justified(self):
+        blind = b.extract_rules('a file with none of the labels')
+        filled = b.slots(FULL_SHEET)
+        every = [p for key in b.SLOT_KEYS for p in filled.get(key, [])]
+        results = b.validate('81 BPM. It opens quietly. It ends loudly.',
+                             GOOD_EXCLUDE, SHEET, blind, filled=filled,
+                             declared=('It opens quietly', 'It ends loudly'),
+                             dropped=tuple(p for p in every if 'BPM' not in p))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'FAIL')
+        self.assertIn('could not be read', entry['detail'])
+
+    def test_the_counts_in_the_note_add_up_to_the_pieces(self):
+        # A reviewer reads this line immediately before approving a spend, and
+        # the earlier version subtracted a set's length from a list's, so a
+        # style repeating one tag reported judgement nobody declared.
+        results = self.run_it(
+            style='81 BPM, 81 BPM, 81 BPM. It opens. It ends.',
+            declared=('It opens', 'It ends'))
+        detail = check(results, 'provenance')['detail']
+        numbers = [int(n)
+                   for n in re.findall(r'(\d+) (?:from|declared|un)', detail)]
+        self.assertEqual(sum(numbers[:4]), 5)
+
+    def test_a_phrase_cannot_be_inverted_and_still_count_as_inherited(self):
+        # The prefix match let 'roughly 12 seconds of build' and 'roughly 12
+        # minutes of total silence' score as the same measurement.
+        inverted = GOOD_STYLE.replace('roughly 12 seconds of build',
+                                      'roughly 12 minutes of total silence')
+        self.assertNotEqual(inverted, GOOD_STYLE)
+        results = self.run_it(style=inverted)
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_an_unacknowledged_ask_first_fails(self):
+        filled = b.slots(FULL_SHEET)
+        filled['ask_first'] = ['tempo is graded INFER: competing level at 4/3']
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'FAIL')
+
+    def test_an_acknowledged_ask_first_passes(self):
+        filled = b.slots(FULL_SHEET)
+        filled['ask_first'] = ['tempo is graded INFER: competing level at 4/3']
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled, acknowledged=True)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'PASS')
+
+    def test_the_default_control_is_one_of_the_choices(self):
+        self.assertIn(b.HOLD_OUT_DEFAULT, b.HOLD_OUT_CHOICES)
+
+    def test_a_held_out_axis_leaves_no_trace_in_the_slots(self):
+        held = b.slots(FULL_SHEET, hold_out='lead_register')
+        self.assertEqual(held['held_out'], 'lead_register')
+        joined = ' '.join(held['instruments']).lower()
+        self.assertNotIn('lead guitar figure', joined)
+        kept = b.slots(FULL_SHEET)
+        self.assertIn('lead guitar figure',
+                      ' '.join(kept['instruments']).lower())
+
+    def test_an_unreadable_rule_reports_unknown_rather_than_pass(self):
+        blind = b.extract_rules('a file with none of the labels')
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, blind)
+        self.assertEqual(check(results, 'banned_words')['verdict'], 'UNKNOWN')
+        self.assertEqual(check(results, 'budget')['verdict'], 'UNKNOWN')
+
+
 if __name__ == '__main__':
     unittest.main()
