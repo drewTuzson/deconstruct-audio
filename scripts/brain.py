@@ -373,6 +373,21 @@ _TEMPO_LEVEL = re.compile(
     r'(?:\s*\(tempogram relative strength\s+([\d.]+)\))?')
 
 
+def _decimal(token):
+    """A number written as text, or None.
+
+    The note is prose, so `[\d.]+` can hand back something like '1.2.3' that
+    float() refuses. A number this cannot read is a level that is not offered,
+    never a ValueError for the top level handler to suppress.
+    """
+    if not token:
+        return None
+    try:
+        return _number(float(token))
+    except (TypeError, ValueError):
+        return None
+
+
 def tempo_levels(entry):
     """Every BPM this tempo fact reported, with how the measurement labelled it.
 
@@ -397,17 +412,22 @@ def tempo_levels(entry):
     if not isinstance(entry, dict):
         return []
     primary = _number(entry.get('value'))
-    levels = [] if primary is None else [
-        {'bpm': primary, 'source': 'primary', 'relative_strength': None}]
+    if primary is None:
+        # No primary means the axis is UNKNOWN, and a family hanging off an
+        # unmeasured tempo is not a set anyone may select from. Offering one
+        # would let a prompt state a BPM for a track whose tempo the sheet
+        # declined to report.
+        return []
+    levels = [{'bpm': primary, 'source': 'primary', 'relative_strength': None}]
     seen = {primary}
-    for ratio, bpm, strength in _TEMPO_LEVEL.findall(_text(entry.get('note')) or ''):
-        value = _number(float(bpm)) if bpm else None
+    for ratio, bpm, strength in _TEMPO_LEVEL.findall(
+            _text(entry.get('note')) or ''):
+        value, rel = _decimal(bpm), _decimal(strength)
         if value is None or value in seen:
             continue
         seen.add(value)
         levels.append({'bpm': value, 'source': f'family {ratio}',
-                       'relative_strength': (_number(float(strength))
-                                             if strength else None)})
+                       'relative_strength': rel})
     return levels
 
 
@@ -433,9 +453,18 @@ def select_tempo_level(entry, wanted):
         return dict(hits[0][1])
     offered = ', '.join(f'{level["bpm"]} ({level["source"]})'
                         for level in levels)
+    # Say WHY the set is thin, but only when it actually is: a note that names
+    # ratios and no BPM has a family the sheet did not carry, which is a
+    # different situation from a tempo that simply has no competing level.
+    # Claiming the first whenever the set is small would be a confident
+    # explanation of something that never happened.
+    note = _text(entry.get('note')) or ''
+    ratios_only = (len(levels) == 1
+                   and re.search(r'[\d.]+x|\d+/\d+', note)
+                   and not _TEMPO_LEVEL.search(note))
     thin = ('; this sheet\'s tempo note names its competing levels by ratio '
-            'with no BPM, so only the primary can be offered from it'
-            if _text(entry.get('note')) and len(levels) == 1 else '')
+            'with no BPM, so the family did not reach the sheet and only the '
+            'primary can be offered from it' if ratios_only else '')
     raise BrainError(
         f'{target} BPM is not a level this measurement reported. Selectable: '
         f'{offered}{thin}. Only a value the measurement itself reported may '

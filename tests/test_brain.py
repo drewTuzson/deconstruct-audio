@@ -408,6 +408,30 @@ class TempoLevelTests(unittest.TestCase):
             b.select_tempo_level(thin, 107.7)
         self.assertIn('no BPM', str(caught.exception))
 
+    def test_a_family_hanging_off_an_unmeasured_tempo_is_not_selectable(self):
+        # No primary means the axis is UNKNOWN. Offering its note's levels
+        # would let a prompt state a BPM for a track whose tempo the sheet
+        # declined to report.
+        self.assertEqual(
+            b.tempo_levels({'value': None, 'confidence': 'UNKNOWN',
+                            'note': FAMILY_NOTE}), [])
+
+    def test_a_number_the_note_mangled_is_skipped_rather_than_raising(self):
+        # The note is prose, so the pattern can hand back something float()
+        # refuses. That is a level not offered, never a ValueError for the top
+        # level handler to turn into 'Details suppressed'.
+        levels = b.tempo_levels({'value': 80.7, 'note': '2x at 1.2.3 BPM'})
+        self.assertEqual([l['bpm'] for l in levels], [80.7])
+
+    def test_a_thin_set_is_only_explained_when_that_is_why(self):
+        # The ratio-only sentence must not be offered as the reason whenever
+        # the set happens to be small, because that would confidently explain
+        # something that did not happen.
+        quiet = {'value': 80.7, 'note': 'Methods agree, nothing else to say.'}
+        with self.assertRaises(b.BrainError) as caught:
+            b.select_tempo_level(quiet, 161.5)
+        self.assertNotIn('no BPM', str(caught.exception))
+
     def test_the_selection_reaches_the_moods_slot(self):
         filled = b.slots(_family_sheet(), tempo_level=161.5)
         self.assertEqual(filled['moods'], ['162 BPM'])
