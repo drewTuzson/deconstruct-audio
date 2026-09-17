@@ -74,6 +74,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `tempo <file>` | Reports tempo as a family of related candidates with a confidence grade, not a single number. Add `--from-drums` to separate first and measure the drums stem |
 | `facts <file>` | Measures every axis on the stem that carries it and writes a fact sheet where each value states its method, its frequency band and a confidence grade. `--stems DIR` adopts an existing six stem folder instead of separating |
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
+| `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -115,6 +116,17 @@ a reference and a candidate go through the same projection and cannot be
 compared on different terms by accident. An `UNKNOWN` axis is left out of that
 projection, which means a `PASS` from `compare` must always be read next to its
 `MEASURED=` count.
+`midi` exists because chord names in a text prompt are discarded. Community
+evidence is consistent on that, and the most cited workaround is supplying
+audio, so the MIDI clip is the channel that carries harmony when text cannot.
+The emitter writes nothing it did not measure: where the third was absent it
+writes root and fifth rather than choosing between major and minor, and where
+the chord itself scored below threshold it writes a sustained root and prints
+which bars those were.
+
+```
+midi facts.json --out progression.mid
+```
 
 ## Saved styles
 
@@ -154,6 +166,9 @@ Credentials live outside the package, in `~/.config/deconstruct-audio/` or where
   defensible readings of the same phrase span 10.8 to 58.0 percent on one track,
   so a figure from another tool is not comparable to this one. Both sides of a
   comparison run through this function or the comparison means nothing.
+- **The MIDI is harmony, not a transcription.** No melody, no inversions, no
+  voicings. A bar whose chord scored low is a sustained root, and the command
+  names those bars rather than letting a thinner clip imply them.
 - Lyrics are not transcribed.
 
 ## Optional: SunoGPT Brain

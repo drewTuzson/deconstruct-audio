@@ -651,6 +651,34 @@ def cmd_facts(args):
                      if e['confidence'] == 'UNKNOWN')
     if unknown:
         print(f'UNRESOLVED={",".join(unknown)}')
+def cmd_midi(args):
+    # midi_emit is imported here, not at module level, for the reason the
+    # comment at the top of this file gives: a module-level import would make
+    # every command fail at import time on an incomplete install, doctor
+    # included, and doctor is what diagnoses that state.
+    import midi_emit
+    # Check the octave before reading anything. The range belongs to midi_emit,
+    # which knows why it is what it is, so this asks that module rather than
+    # restating the bounds here and creating a second place to keep them right.
+    try:
+        midi_emit.check_octave(args.octave)
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
+    # read_facts, not a bare json.loads. A typo in the path reaches the
+    # top-level handler as a FileNotFoundError and prints "Details suppressed
+    # to protect secrets", which is the exact failure read_facts was written to
+    # stop, and there is no secret in a path the user just typed.
+    sheet = read_facts(args.facts, 'input')
+    out = args.out or args.facts.parent / 'progression.mid'
+    try:
+        midi_emit.progression(sheet, octave=args.octave).save(str(out))
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
+    print(f'MIDI_WRITTEN={out}')
+    sustained = midi_emit.low_confidence_bars(sheet)
+    if sustained:
+        print(f'SUSTAINED_ROOT_BARS={",".join(str(b) for b in sustained)}')
+        print(midi_emit.LOW_CONFIDENCE_NOTE, file=sys.stderr)
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -702,6 +730,19 @@ def main():
     e.add_argument('--style', default=None, help="New style text, or '-' to read it from stdin.")
     e.add_argument('--notes', default=None, help='New notes. Pass an empty string to clear them.')
     r = sub.add_parser('rename-style'); r.add_argument('name'); r.add_argument('new_name')
+    mi = sub.add_parser(
+        'midi',
+        help='Write the measured chord progression of a fact sheet to a MIDI file.',
+        description='Write the measured chord progression to a MIDI file at the '
+                    'measured tempo, one chord per bar, root position. Bars whose '
+                    'third was not measured carry root and fifth. Bars whose root '
+                    'margin fell below threshold carry a sustained root and are '
+                    'named on stdout.')
+    mi.add_argument('facts', type=Path, help='Fact sheet written by the facts command.')
+    mi.add_argument('--out', type=Path, default=None,
+                    help='Output file. Defaults to progression.mid beside the fact sheet.')
+    mi.add_argument('--octave', type=int, default=3,
+                    help='Octave of the chord roots, -1 to 8. Outside that range the root or its fifth leaves the MIDI range, and the command says so rather than moving your music quietly.')
     args = p.parse_args()
     if args.command == 'doctor':
         doctor()
@@ -766,6 +807,8 @@ def main():
         cmd_rename_style(args)
     elif args.command == 'delete-style':
         cmd_delete_style(args)
+    elif args.command == 'midi':
+        cmd_midi(args)
 
 if __name__ == '__main__':
     for stream in (sys.stdout, sys.stderr):
