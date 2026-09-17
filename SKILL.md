@@ -50,6 +50,16 @@ The emitter writes no pitch it did not measure, and reporting the result means p
 
 A fact sheet with no chord sequence, or one graded UNKNOWN, is an error and not an empty file. So is a chord window that spans no time or runs backwards: the emitter refuses to invent a width, and the message names the bar and its two timestamps. That is a data problem in the fact sheet, so read it as one rather than retrying the command.
 
+## Scene and era: research
+
+`research <facts.json>` runs only when the user supplies an artist or a song name. It writes `research.json` and `research.md` beside the fact sheet, prints `RESEARCH_WRITTEN=<path>` and `COLLISIONS=<n>`, and never writes into `facts.json`.
+
+The searching is yours, not the script's. The command makes no network call: you do the looking, then hand the results to `--claims` as a JSON array of claim objects, each one carrying `axis`, `value`, `source`, and a `confidence` of `KNOW`, `INFER` or `GUESS`. A claim with no source is refused rather than saved, because an unsourced claim is a memory and this file exists to keep memories out of the facts. File a claim under whichever axis name you read it against: both the fact sheet's names and the projected names `scorable.json` uses resolve to the same measurement.
+
+Never promote a research claim into a fact. A claim that speaks to an axis the sheet measured appears in the collision table with both values side by side and the measurement marked authoritative, and that is where it stays. When the sheet measured a tempo or a key, quote the measured one and never the researched one, even when the researched one is better sourced, more specific or agrees with what the track sounds like. Where the two disagree the command prints a `DISAGREEMENT` line, and the honest report of that is both numbers with the measurement named as the answer.
+
+A claim on an axis nothing measured is kept as context. It is usable for what no measurement covers, such as the scene or the era a sound belongs to, and describing that scene is a legitimate use of it. It never becomes a number in a prompt.
+
 ## Use with the Brain
 
 When the user wants a Suno prompt and a Brain is configured, read [references/brain.md](references/brain.md). Load the user's own Brain instructions, determine the requested Suno mode, and use the reviewed report as source evidence. Keep faithful analysis separate from mode-specific prompt choices. Count exact output field characters against that user's loaded rules; do not ship one person's limits or preferences as universal Suno requirements.
