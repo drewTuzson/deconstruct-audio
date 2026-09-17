@@ -750,7 +750,13 @@ def cmd_research(args):
                   f'measured={row["measured"]} researched={row["researched"]} '
                   f'authoritative=measured')
 
-def main():
+def build_parser():
+    """Construct the argument parser.
+
+    Split out of main() so a test can parse real arguments through it without
+    dispatching a command. Construction only: no argument, default or dispatch
+    branch changed on the way out.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
     for cmd in ('doctor', 'set-key', 'verify', 'finish-setup', 'disconnect-brain', 'forget-key'):
@@ -820,7 +826,11 @@ def main():
     rp.add_argument('--claims', type=Path, default=None,
                     help='JSON array of claim objects gathered by the agent.')
     rp.add_argument('--out', type=Path, default=None)
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
     if args.command == 'doctor':
         doctor()
     elif args.command == 'set-key':
