@@ -9,6 +9,7 @@ A rule that cannot be found reports UNREADABLE. It never reports a pass. A
 check that could not locate its rule is not a check that succeeded, and this
 project exists because something once reported a result it had not earned.
 """
+import math
 import re
 from pathlib import Path
 
@@ -282,7 +283,7 @@ def _number(value):
     number = float(value)
     # NaN and infinity are not measurements. write_json refuses them on the way
     # out; this refuses them on the way in.
-    return number if number == number and abs(number) != float('inf') else None
+    return number if math.isfinite(number) else None
 
 
 def _numbers(value):
@@ -291,6 +292,11 @@ def _numbers(value):
         return None
     out = [_number(item) for item in value]
     return None if any(item is None for item in out) else out
+
+
+def _text(value):
+    """A non empty string, or None. A number is not a name."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _field(entry, key):
@@ -303,11 +309,6 @@ def _text_field(entry, key):
     """One string field out of a Fact's value mapping, or None."""
     value = entry.get('value')
     return _text(value.get(key)) if isinstance(value, dict) else None
-
-
-def _text(value):
-    """A non empty string, or None. A number is not a name."""
-    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _usable(sheet, axis):
