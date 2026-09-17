@@ -75,6 +75,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `facts <file>` | Measures every axis on the stem that carries it and writes a fact sheet where each value states its method, its frequency band and a confidence grade. `--stems DIR` adopts an existing six stem folder instead of separating |
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
 | `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
+| `research <facts.json>` | Records scene and era claims gathered for a supplied artist or song name, in their own file, and prints every collision with a measured fact. The measurement is authoritative on every collision |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -127,6 +128,33 @@ which bars those were.
 ```
 midi facts.json --out progression.mid
 ```
+
+## Research, when a name is supplied
+
+The research branch is optional and runs only when you supply a name. It writes
+`research.json` and `research.md` beside the fact sheet and never writes into
+`facts.json`.
+
+Every claim carries its source. A claim with no source raises rather than
+saving, because an unsourced claim is a memory and this file exists to keep
+memories out of the facts. Where a claim and a measurement speak to the same
+axis, both are printed side by side and the measurement is authoritative. That
+is a constant in the code, not a rule someone has to remember.
+
+A claim on an axis nothing measured is kept as context. It is usable for what
+no measurement covers, such as the scene a sound belongs to. It never becomes
+a number.
+
+```
+research facts.json --artist "An Artist" --title "A Song" --claims claims.json
+```
+
+The searching is the agent's work, not the script's. `research` makes no
+network call: `--claims` takes a JSON array of claim objects the agent
+gathered, each carrying `axis`, `value`, `source` and a `confidence` of `KNOW`,
+`INFER` or `GUESS`. A claim filed under either naming scheme collides, so
+`tempo_bpm` from `scorable.json` meets the sheet's `tempo` rather than slipping
+through as context.
 
 ## Saved styles
 
