@@ -26,6 +26,7 @@ GATES = {
     'low_end_share': {'kind': 'absolute', 'limit': 3.0, 'label': 'Low end share'},
     'section_count': {'kind': 'absolute', 'limit': 1, 'label': 'Section count'},
     'lead_register_midi': {'kind': 'absolute', 'limit': 5, 'label': 'Lead register'},
+    'tuning': {'kind': 'tuning', 'label': 'Tuning'},
 }
 
 
@@ -122,6 +123,55 @@ def key_verdict(reference, candidate):
     return 'FAIL', 'unrelated key'
 
 
+def normalise_tuning(value):
+    """Canonical '<qualifier> <pitch>' form, or None when this names no tuning.
+
+    The pitch is read from whichever END carries it, because the conventional
+    names put it at either one: 'drop C#' finishes with it and 'Eb standard'
+    opens with it. Folding the last token only made Eb and D# two spellings
+    that scored FAIL against each other.
+
+    A string with no note name at either end is not a tuning, and returning
+    None for it is what stops 'unknown' matching 'unknown' and counting as a
+    measured axis. key_verdict already learned this: any two identical strings
+    compare equal, so a sentinel earned a PASS on an axis nothing measured.
+
+    Only the ends are searched, never the middle. Every single letter from A to
+    G is a note name, so scanning all tokens reads the article in 'not a
+    tuning' as the pitch A and hands back 'not tuning A', which passes against
+    itself and reopens the hole this function exists to close.
+    """
+    if not isinstance(value, str):
+        return None
+    tokens = value.strip().lower().split()
+    if not tokens:
+        return None
+
+    def pitch_of(token):
+        upper = token.upper()
+        upper = FLATS_TO_SHARPS.get(upper, upper)
+        return upper if upper in NOTES else None
+
+    # Last first: 'drop C#' and 'standard E' are the common shapes.
+    pitch = pitch_of(tokens[-1])
+    rest = tokens[:-1]
+    if pitch is None:
+        pitch = pitch_of(tokens[0])
+        rest = tokens[1:]
+    if pitch is None:
+        return None
+    return f'{" ".join(rest) or "standard"} {pitch}'
+
+
+def tuning_verdict(reference, candidate):
+    a, b = normalise_tuning(reference), normalise_tuning(candidate)
+    if a is None or b is None:
+        return 'UNKNOWN', 'tuning not parseable'
+    if a == b:
+        return 'PASS', 'same tuning'
+    return 'FAIL', f'{candidate} is not {reference}'
+
+
 def tempo_verdict(reference, candidate):
     # Guarded here rather than only in score(), because tempo_verdict is
     # public and called directly, so the entry point has to be safe too.
@@ -152,6 +202,9 @@ def score(reference, candidate):
             continue
         if gate['kind'] == 'key':
             verdict, note = key_verdict(ref, cand)
+            delta = None
+        elif gate['kind'] == 'tuning':
+            verdict, note = tuning_verdict(ref, cand)
             delta = None
         elif gate['kind'] == 'percent':
             verdict, note, delta = tempo_verdict(ref, cand)
