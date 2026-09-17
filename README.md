@@ -58,6 +58,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 .venv/bin/python scripts/deconstruct.py separate /path/to/track.wav
 .venv/bin/python scripts/deconstruct.py tempo /path/to/track.wav --from-drums
 .venv/bin/python scripts/deconstruct.py compare reference.json candidate.json
+.venv/bin/python scripts/deconstruct.py facts /path/to/track.wav --stems /path/to/stems
 ```
 
 | Command | What it does |
@@ -71,6 +72,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `analyze <file> --local-only` | Measures without any network call. Produces no listening assessment and no style line |
 | `separate <file>` | Splits the audio into six stems with Demucs and prints `STEM_<NAME>=<path>` for each. Cached by source hash, so a repeat run reuses them. `--out` puts the cache somewhere other than the configuration directory |
 | `tempo <file>` | Reports tempo as a family of related candidates with a confidence grade, not a single number. Add `--from-drums` to separate first and measure the drums stem |
+| `facts <file>` | Measures every axis on the stem that carries it and writes a fact sheet where each value states its method, its frequency band and a confidence grade. `--stems DIR` adopts an existing six stem folder instead of separating |
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
@@ -84,7 +86,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 
 ## Measuring instead of describing
 
-`analyze` asks a model what it hears. These three commands do not ask anything; they measure, and they say how sure they are.
+`analyze` asks a model what it hears. These four commands do not ask anything; they measure, and they say how sure they are.
 
 `separate` runs Demucs over the file and writes six stems: drums, bass, guitar, piano, vocals, other. The six-stem model is used rather than the default four-stem split because that one buries guitar inside an "other" bucket. Stems are cached under your configuration directory and keyed by a hash of the source, so analysing the same track twice separates it once.
 
@@ -95,6 +97,24 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 ```
 compare reference.json candidate.json
 ```
+
+`facts` is the measurement path's output. It reads each property from the stem
+that carries it, declares the frequency band it read, and grades every value
+`KNOW`, `INFER` or `UNKNOWN`. Constructing a fact without a method or a grade
+raises rather than producing one, so an ungraded number cannot reach the sheet.
+
+`UNKNOWN` means a method was tried and did not resolve, and the note says which
+methods. Section count is the standing example: sixteen segmentation methods
+were run against a three track corpus and none generalised, so the sheet emits
+section boundaries and refuses to state a count. A number that is about half
+likely to be wrong is worse than no number, because a stated number invites
+downstream use that a missing one does not.
+
+`scorable.json` beside the sheet projects it onto the axes `compare` scores, so
+a reference and a candidate go through the same projection and cannot be
+compared on different terms by accident. An `UNKNOWN` axis is left out of that
+projection, which means a `PASS` from `compare` must always be read next to its
+`MEASURED=` count.
 
 ## Saved styles
 
@@ -126,6 +146,14 @@ Credentials live outside the package, in `~/.config/deconstruct-audio/` or where
 - **`compare` scores only what both sides measured**, against loose gates. A `PASS` above a high `UNMEASURED` count means little was checked, not that little was wrong.
 - `analyze` does no stem separation; `separate` is a separate command and needs a multi-gigabyte Demucs and torch install. There is still no plugin chain recovery and no track count, and the prompt forbids inventing them.
 - One file per run, longer than zero seconds and up to 30 minutes. Longer recordings need an excerpt you choose; the script will not trim silently.
+- **Section count is not measured.** Boundaries are. Sixteen structure
+  segmentation methods failed to generalise across a three track corpus, so the
+  sheet reports `UNKNOWN` for the count rather than a number it has not earned.
+- **Low end share is a pinned definition, not a universal one.** It is the per
+  frame mean magnitude share below 150 Hz at `n_fft` 2048, mono, 22050 Hz. Eight
+  defensible readings of the same phrase span 10.8 to 58.0 percent on one track,
+  so a figure from another tool is not comparable to this one. Both sides of a
+  comparison run through this function or the comparison means nothing.
 - Lyrics are not transcribed.
 
 ## Optional: SunoGPT Brain
