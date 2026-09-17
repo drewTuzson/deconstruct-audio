@@ -651,6 +651,104 @@ def cmd_facts(args):
                      if e['confidence'] == 'UNKNOWN')
     if unknown:
         print(f'UNRESOLVED={",".join(unknown)}')
+def cmd_midi(args):
+    # midi_emit is imported here, not at module level, for the reason the
+    # comment at the top of this file gives: a module-level import would make
+    # every command fail at import time on an incomplete install, doctor
+    # included, and doctor is what diagnoses that state.
+    import midi_emit
+    # Check the octave before reading anything. The range belongs to midi_emit,
+    # which knows why it is what it is, so this asks that module rather than
+    # restating the bounds here and creating a second place to keep them right.
+    try:
+        midi_emit.check_octave(args.octave)
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
+    # read_facts, not a bare json.loads. A typo in the path reaches the
+    # top-level handler as a FileNotFoundError and prints "Details suppressed
+    # to protect secrets", which is the exact failure read_facts was written to
+    # stop, and there is no secret in a path the user just typed.
+    sheet = read_facts(args.facts, 'input')
+    out = args.out or args.facts.parent / 'progression.mid'
+    try:
+        midi_emit.progression(sheet, octave=args.octave).save(str(out))
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
+    print(f'MIDI_WRITTEN={out}')
+    sustained = midi_emit.low_confidence_bars(sheet)
+    if sustained:
+        print(f'SUSTAINED_ROOT_BARS={",".join(str(b) for b in sustained)}')
+        print(midi_emit.LOW_CONFIDENCE_NOTE, file=sys.stderr)
+
+def cmd_research(args):
+    # research is imported here, not at module level, for the reason the
+    # comment at the top of this file gives. research.py is standard library
+    # only today, so this costs nothing, but the rule is about the file the
+    # import would land in, not about this module's weight.
+    import research as research_mod
+    # read_facts, not json.loads. A mistyped path through a bare json.loads
+    # reaches the user as 'ERROR: FileNotFoundError ... Details suppressed to
+    # protect secrets', which is the failure read_facts exists to stop. The
+    # MIDI command shipped with the same defect and fixed it.
+    sheet = read_facts(args.facts, 'input')
+    raw = []
+    if args.claims:
+        # The claims file gets the same authored failures read_facts gives the
+        # fact sheet. Left to the top-level handler, a mistyped path, a stray
+        # comma or a NaN all print 'Details suppressed to protect secrets',
+        # which says nothing about a file the user just wrote and holds no
+        # secret to protect.
+        try:
+            claims_text = args.claims.read_text(encoding='utf-8')
+        except (OSError, UnicodeError):
+            raise SkillError('Cannot read the claims file: ' + str(args.claims)
+                             + '. Supply a readable JSON array of claim '
+                             'objects.') from None
+
+        def reject_constant(name):
+            # json.loads accepts NaN and Infinity, which are not JSON and which
+            # write_json then refuses on the way back out. Refusing at the door
+            # names the file the user can fix.
+            raise SkillError('The claims file holds ' + name + ', which is not '
+                             'valid JSON: ' + str(args.claims) + '.')
+
+        try:
+            raw = json.loads(claims_text, parse_constant=reject_constant)
+        except json.JSONDecodeError:
+            raise SkillError('The claims file is not valid JSON: '
+                             + str(args.claims) + '.') from None
+        if not isinstance(raw, list) or not all(isinstance(c, dict) for c in raw):
+            raise SkillError('--claims must hold a JSON array of claim objects')
+    try:
+        claims = [research_mod.claim(
+            c['axis'], c['value'], c['source'], c['confidence'], c.get('note'))
+            for c in raw]
+        rec = research_mod.record(args.artist, args.title, claims)
+    except research_mod.ResearchError as exc:
+        # Wrapped in SkillError so the authored text reaches the user. The
+        # top-level handler prints only SkillError verbatim; anything else
+        # becomes 'Details suppressed to protect secrets', which would throw
+        # away the one sentence this module exists to say.
+        raise SkillError(str(exc)) from None
+    except KeyError as exc:
+        raise SkillError(f'a claim in {args.claims} is missing {exc}') from None
+    out = args.out or args.facts.parent
+    out.mkdir(parents=True, exist_ok=True)
+    # write_json, not an inline dumps. The helper already owns the atomic
+    # mkstemp then os.replace pattern and the allow_nan=False rule, and a
+    # command growing its own writer when a helper owns one is the split
+    # AGENTS.md names. The helper landed after this plan was written.
+    write_json(out / 'research.json', rec)
+    (out / 'research.md').write_text(
+        research_mod.render_markdown(sheet, rec), encoding='utf-8')
+    rows = research_mod.collisions(sheet, rec)
+    print(f'RESEARCH_WRITTEN={out / "research.md"}')
+    print(f'COLLISIONS={len(rows)}')
+    for row in rows:
+        if not row['agrees']:
+            print(f'DISAGREEMENT axis={row["axis"]} '
+                  f'measured={row["measured"]} researched={row["researched"]} '
+                  f'authoritative=measured')
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -702,6 +800,26 @@ def main():
     e.add_argument('--style', default=None, help="New style text, or '-' to read it from stdin.")
     e.add_argument('--notes', default=None, help='New notes. Pass an empty string to clear them.')
     r = sub.add_parser('rename-style'); r.add_argument('name'); r.add_argument('new_name')
+    mi = sub.add_parser(
+        'midi',
+        help='Write the measured chord progression of a fact sheet to a MIDI file.',
+        description='Write the measured chord progression to a MIDI file at the '
+                    'measured tempo, one chord per bar, root position. Bars whose '
+                    'third was not measured carry root and fifth. Bars whose root '
+                    'margin fell below threshold carry a sustained root and are '
+                    'named on stdout.')
+    mi.add_argument('facts', type=Path, help='Fact sheet written by the facts command.')
+    mi.add_argument('--out', type=Path, default=None,
+                    help='Output file. Defaults to progression.mid beside the fact sheet.')
+    mi.add_argument('--octave', type=int, default=3,
+                    help='Octave of the chord roots, -1 to 8. Outside that range the root or its fifth leaves the MIDI range, and the command says so rather than moving your music quietly.')
+    rp = sub.add_parser('research')
+    rp.add_argument('facts', type=Path)
+    rp.add_argument('--artist', default='')
+    rp.add_argument('--title', default='')
+    rp.add_argument('--claims', type=Path, default=None,
+                    help='JSON array of claim objects gathered by the agent.')
+    rp.add_argument('--out', type=Path, default=None)
     args = p.parse_args()
     if args.command == 'doctor':
         doctor()
@@ -766,6 +884,10 @@ def main():
         cmd_rename_style(args)
     elif args.command == 'delete-style':
         cmd_delete_style(args)
+    elif args.command == 'midi':
+        cmd_midi(args)
+    elif args.command == 'research':
+        cmd_research(args)
 
 if __name__ == '__main__':
     for stream in (sys.stdout, sys.stderr):

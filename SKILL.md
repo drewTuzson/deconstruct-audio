@@ -40,6 +40,25 @@ Four commands measure instead of describing. None of them needs a key, a complet
 `facts <file>` writes a fact sheet where every axis carries the stem it was read from, the frequency band it was read over, every method that ran, and a confidence grade of KNOW, INFER or UNKNOWN. It writes `facts.json`, `facts.md` and `scorable.json` into `--out`, which defaults to `./reports`, and prints `FACTS_WRITTEN=`, `SCORABLE_WRITTEN=`, a count per grade, and `UNRESOLVED=` naming any axis that did not resolve. `--stems DIR` adopts an existing six stem folder instead of separating, matching the stem name case-insensitively anywhere in the filename, and a folder that does not yield all six is an error rather than a partial sheet.
 
 Two rules bind you when you write prose from a sheet. Never promote an UNKNOWN axis to a stated fact: UNKNOWN means a method was tried and did not resolve, and the note says which methods, so report the attempt and its failure rather than filling the gap. Section count and harmonic rhythm are UNKNOWN by design on this material, and a count that is about half likely to be wrong is worse than no count. Second, always read a `compare` verdict next to its `MEASURED=` count. `scorable.json` omits UNKNOWN axes, and `compare` scores only axes present on both sides, so a sheet that resolved nothing would print VERDICT=PASS having measured nothing. The verdict alone is not the result; the verdict with its measured count is.
+## Harmony as MIDI: midi
+
+`midi <facts.json>` writes the measured chord progression of a fact sheet to a MIDI file and prints `MIDI_WRITTEN=<path>`. It exists because chord names written into a text prompt are discarded by the generator, so the clip is the channel that carries harmony when text cannot. `--out` names the file, which otherwise lands as `progression.mid` beside the fact sheet, and `--octave` moves the chord roots, from -1 to 8. Outside that range the root or the fifth above it leaves the MIDI range, and the command says so and stops rather than quietly using the nearest octave it can represent. It reads only the fact sheet: no audio, no network, no key.
+
+Never describe the output as a transcription. It is the harmonic skeleton and nothing else: one chord per bar, root position block chords, no melody, no inversions, no voicings. Say "the measured chord progression", not "the song as MIDI".
+
+The emitter writes no pitch it did not measure, and reporting the result means passing that on rather than smoothing it over. A bar whose third was never measured carries root and fifth, because most distorted guitar is genuinely ambiguous between major and minor and a guessed third would be the tool inventing information. A bar whose root barely beat the runner up carries a sustained root instead of a chord; those bars are printed as `SUSTAINED_ROOT_BARS=<indices>` with a note on stderr, and naming them is the point. If that line appears, say which bars the emitter could not resolve rather than letting a thinner sounding clip imply it.
+
+A fact sheet with no chord sequence, or one graded UNKNOWN, is an error and not an empty file. So is a chord window that spans no time or runs backwards: the emitter refuses to invent a width, and the message names the bar and its two timestamps. That is a data problem in the fact sheet, so read it as one rather than retrying the command.
+
+## Scene and era: research
+
+`research <facts.json>` runs only when the user supplies an artist or a song name. It writes `research.json` and `research.md` beside the fact sheet, prints `RESEARCH_WRITTEN=<path>` and `COLLISIONS=<n>`, and never writes into `facts.json`.
+
+The searching is yours, not the script's. The command makes no network call: you do the looking, then hand the results to `--claims` as a JSON array of claim objects, each one carrying `axis`, `value`, `source`, and a `confidence` of `KNOW`, `INFER` or `GUESS`. A claim with no source is refused rather than saved, because an unsourced claim is a memory and this file exists to keep memories out of the facts. File a claim under whichever axis name you read it against: both the fact sheet's names and the projected names `scorable.json` uses resolve to the same measurement.
+
+Never promote a research claim into a fact. A claim that speaks to an axis the sheet measured appears in the collision table with both values side by side and the measurement marked authoritative, and that is where it stays. When the sheet measured a tempo or a key, quote the measured one and never the researched one, even when the researched one is better sourced, more specific or agrees with what the track sounds like. Where the two disagree the command prints a `DISAGREEMENT` line, and the honest report of that is both numbers with the measurement named as the answer.
+
+A claim on an axis nothing measured is kept as context. It is usable for what no measurement covers, such as the scene or the era a sound belongs to, and describing that scene is a legitimate use of it. It never becomes a number in a prompt.
 
 ## Use with the Brain
 

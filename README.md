@@ -74,6 +74,8 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `tempo <file>` | Reports tempo as a family of related candidates with a confidence grade, not a single number. Add `--from-drums` to separate first and measure the drums stem |
 | `facts <file>` | Measures every axis on the stem that carries it and writes a fact sheet where each value states its method, its frequency band and a confidence grade. `--stems DIR` adopts an existing six stem folder instead of separating |
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
+| `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
+| `research <facts.json>` | Records scene and era claims gathered for a supplied artist or song name, in their own file, and prints every collision with a measured fact. The measurement is authoritative on every collision |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -115,6 +117,44 @@ a reference and a candidate go through the same projection and cannot be
 compared on different terms by accident. An `UNKNOWN` axis is left out of that
 projection, which means a `PASS` from `compare` must always be read next to its
 `MEASURED=` count.
+`midi` exists because chord names in a text prompt are discarded. Community
+evidence is consistent on that, and the most cited workaround is supplying
+audio, so the MIDI clip is the channel that carries harmony when text cannot.
+The emitter writes nothing it did not measure: where the third was absent it
+writes root and fifth rather than choosing between major and minor, and where
+the chord itself scored below threshold it writes a sustained root and prints
+which bars those were.
+
+```
+midi facts.json --out progression.mid
+```
+
+## Research, when a name is supplied
+
+The research branch is optional and runs only when you supply a name. It writes
+`research.json` and `research.md` beside the fact sheet and never writes into
+`facts.json`.
+
+Every claim carries its source. A claim with no source raises rather than
+saving, because an unsourced claim is a memory and this file exists to keep
+memories out of the facts. Where a claim and a measurement speak to the same
+axis, both are printed side by side and the measurement is authoritative. That
+is a constant in the code, not a rule someone has to remember.
+
+A claim on an axis nothing measured is kept as context. It is usable for what
+no measurement covers, such as the scene a sound belongs to. It never becomes
+a number.
+
+```
+research facts.json --artist "An Artist" --title "A Song" --claims claims.json
+```
+
+The searching is the agent's work, not the script's. `research` makes no
+network call: `--claims` takes a JSON array of claim objects the agent
+gathered, each carrying `axis`, `value`, `source` and a `confidence` of `KNOW`,
+`INFER` or `GUESS`. A claim filed under either naming scheme collides, so
+`tempo_bpm` from `scorable.json` meets the sheet's `tempo` rather than slipping
+through as context.
 
 ## Saved styles
 
@@ -154,6 +194,9 @@ Credentials live outside the package, in `~/.config/deconstruct-audio/` or where
   defensible readings of the same phrase span 10.8 to 58.0 percent on one track,
   so a figure from another tool is not comparable to this one. Both sides of a
   comparison run through this function or the comparison means nothing.
+- **The MIDI is harmony, not a transcription.** No melody, no inversions, no
+  voicings. A bar whose chord scored low is a sustained root, and the command
+  names those bars rather than letting a thinner clip imply them.
 - Lyrics are not transcribed.
 
 ## Optional: SunoGPT Brain

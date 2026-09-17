@@ -1,0 +1,35 @@
+{
+  "schema": "deconstruct-audio/facts/1",
+  "generated_at": "2026-09-17T00:00:00Z",
+  "source": {"path": "fixture.wav", "sha256": "0", "duration_s": 16.0},
+  "stems_from": "adopted",
+  "facts": {
+    "tempo": {"value": 80.0, "unit": "bpm", "stem": "drums", "band_hz": null,
+              "method": ["tempogram-peak"], "confidence": "KNOW",
+              "suno_actionable": "direct", "note": null},
+    "section_boundaries": {"value": [0.0, 3.0, 9.0], "unit": "seconds",
+                 "stem": "mix", "band_hz": null,
+                 "method": ["agglomerative-clustering"], "confidence": "INFER",
+                 "suno_actionable": "direct", "note": null},
+    "section_count": {"value": null, "unit": "count", "stem": "mix",
+                 "band_hz": null, "method": ["agglomerative-clustering"],
+                 "confidence": "UNKNOWN", "suno_actionable": "none",
+                 "note": "no method generalised across the corpus"},
+    "chords": {"value": [
+        {"start_s": 3.0, "end_s": 6.0, "root": "F#", "quality": "power",
+         "root_share": 0.31, "root_margin": 1.55,
+         "third_present": false, "fifth_present": true},
+        {"start_s": 6.0, "end_s": 9.0, "root": "A", "quality": "major",
+         "root_share": 0.28, "root_margin": 1.47,
+         "third_present": true, "fifth_present": true},
+        {"start_s": 9.0, "end_s": 12.0, "root": "E", "quality": "minor",
+         "root_share": 0.26, "root_margin": 1.38,
+         "third_present": true, "fifth_present": true},
+        {"start_s": 12.0, "end_s": 15.0, "root": "B", "quality": "power",
+         "root_share": 0.19, "root_margin": 1.04,
+         "third_present": false, "fifth_present": false}],
+      "unit": "sequence", "stem": "guitar", "band_hz": [150, 2500],
+      "method": ["beat-sync-chroma"], "confidence": "INFER",
+      "suno_actionable": "midi_only", "note": null}
+  }
+}
