@@ -266,11 +266,26 @@ MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
 # and at 0.12 the rule fired on 3 bars out of 163 across the whole corpus, so
 # it was close to a no op wearing the name of a safeguard.
 #
-# 1.25 is a STARTING value and Task 5 Step 2 is where you replace it. Measure
-# the root_margin distribution across all three corpus tracks, put the
-# histogram in the pull request, and set this from that. If the measured
-# distribution says a different number, use it and say so.
-MIN_MARGIN = 1.25
+# 1.05, not 1.25. Measured across all three corpus fact sheets, 163 bars:
+#
+#   murder    45 bars  min 1.001  median 1.149  max 1.777
+#   danger    65 bars  min 1.001  median 1.126  max 1.657
+#   wrongturn 53 bars  min 1.001  median 1.183  max 3.144
+#
+# 1.25 sits ABOVE the median on every track and would turn 122 of 163 bars into
+# sustained roots, 75 percent of the corpus. The constant it replaced fired on
+# 3 bars of 163. Both were chosen without looking at the distribution and both
+# are wrong, in opposite directions.
+#
+# 1.05 is set from what the number means rather than from a target hit rate. A
+# margin of exactly 1.0 is a tie between two pitch classes, so 1.05 flags the
+# bars where the winning root beat the runner up by less than five percent.
+# That is the condition a sustained root is FOR.
+#
+# Task 3 Step 5 re-measures this against the real sheets, before Task 4 runs the
+# command end to end. If the distribution argues for a different cut, use it and
+# say why.
+MIN_MARGIN = 1.05
 
 
 class MidiEmitError(Exception):
@@ -377,6 +392,12 @@ class FileTests(unittest.TestCase):
                 break
         expected = int(round(3.0 * self.mid.ticks_per_beat * 80.0 / 60.0))
         self.assertEqual(first_on, expected)
+
+    def test_the_clip_ends_where_the_last_measured_chord_ends(self):
+        # The start was checked and the end was not, and the end is where a
+        # uniform bar width accumulated 4.114 s of drift on a real track.
+        last_end = float(FIXTURE['facts']['chords']['value'][-1]['end_s'])
+        self.assertAlmostEqual(self.mid.length, last_end, delta=0.05)
 
     def test_alignment_can_be_turned_off(self):
         loose = m.progression(FIXTURE, align=False)
@@ -509,24 +530,43 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
     # tick 0 while its self review claimed section timings were mirrored. What
     # was actually inherited was the chord ORDER. A clip handed to a generator
     # as a timeline anchor that starts 5.55 s early is not an anchor.
-    lead_ticks = 0
-    if align and sequence:
-        first = float(sequence[0].get('start_s') or 0.0)
-        ticks_per_second = ticks_per_beat * float(bpm) / 60.0
-        lead_ticks = max(0, int(round(first * ticks_per_second)))
+    ticks_per_second = ticks_per_beat * float(bpm) / 60.0
+
+    # Each bar is placed AND sized from its own measured window, not written at
+    # a uniform width from tick zero.
+    #
+    # Two separate defects came from the uniform version. It started the clip
+    # 5.55 s early on the reference track, because the first measured chord does
+    # not begin at zero. And it drifted: the bar windows come from a tracked
+    # beat grid whose spacing follows the performance, so on Wrong Turn 28 of 52
+    # interior windows deviate from the nominal bar and the clip finished 4.114
+    # seconds late. A clip that ends four seconds late is no more an anchor than
+    # one that starts five seconds early, and an earlier self review blamed that
+    # drift on a single partial bar, which the window data contradicts.
+    cursor = 0
     for index, entry in enumerate(sequence):
         margin = entry.get('root_margin')
         if margin is None or float(margin) < min_margin:
             pitches = [root_midi(entry['root'], octave)]
         else:
             pitches = chord_pitches(entry, octave)
+        if align:
+            start = int(round(float(entry.get('start_s') or 0.0) * ticks_per_second))
+            end = int(round(float(entry.get('end_s') or 0.0) * ticks_per_second))
+            width = max(1, end - start)
+        else:
+            start = index * bar_ticks
+            width = bar_ticks
         for offset, pitch in enumerate(pitches):
             track.append(mido.Message(
                 'note_on', note=pitch, velocity=VELOCITY,
-                time=(lead_ticks if index == 0 else 0) if offset == 0 else 0))
+                time=(start - cursor) if offset == 0 else 0))
+            if offset == 0:
+                cursor = start
         for offset, pitch in enumerate(pitches):
             track.append(mido.Message('note_off', note=pitch, velocity=0,
-                                      time=bar_ticks if offset == 0 else 0))
+                                      time=width if offset == 0 else 0))
+        cursor = start + width
     track.append(mido.MetaMessage('end_of_track', time=0))
     return mid
 
@@ -545,14 +585,47 @@ def low_confidence_bars(sheet, min_margin=MIN_MARGIN):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_midi -v`
-Expected: PASS, 20 tests
+Expected: PASS, 21 tests
 
 If `test_every_note_on_has_a_matching_note_off` fails, the delta time bookkeeping
 in the note_off loop is wrong, not the test. In a mido track every message's
 `time` is a delta from the previous message, so only the first note_off in a
 chord carries the bar length and the rest carry zero. Fix the emitter.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Measure the margin distribution and confirm MIN_MARGIN**
+
+This runs BEFORE Task 4's end to end command, so the output pasted into the pull
+request is the final behaviour rather than a value about to be replaced.
+
+```bash
+cd /Users/drewtuzson/Documents/Projects/deconstruct-audio
+DESK=/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17
+.venv/bin/python -c "
+import json, statistics
+from pathlib import Path
+for path in sorted(Path('$DESK/evidence').glob('facts-*.json')):
+    seq = json.loads(path.read_text())['facts']['chords']['value'] or []
+    m = [e['root_margin'] for e in seq if e.get('root_margin') is not None]
+    if not m:
+        print(path.name, 'no margins'); continue
+    for cut in (1.02, 1.05, 1.10, 1.25):
+        flagged = sum(1 for x in m if x < cut)
+        print(f'{path.name:40s} cut={cut:.2f} flagged={flagged:3d}/{len(m):3d} '
+              f'({100*flagged/len(m):5.1f}%) median={statistics.median(m):.3f}')
+"
+```
+
+Expected shape, not an exact number: 1.25 flags roughly three quarters of every
+track, which is why it was rejected, and 1.05 flags a small tail. Put the table
+in the pull request. If your measured distribution argues for a different cut,
+change it and say why.
+
+**What not to do.** Do not set it so a particular count of bars is flagged, and
+do not set it so a test passes. One earlier constant fired on 3 bars in 163, a
+safeguard that never fires wearing the name of one, and its replacement fired on
+122, which is not a safeguard either.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/midi_emit.py tests/test_midi.py
@@ -830,15 +903,25 @@ nothing in the module can emit a pitch that is not a chord tone of a measured
 entry.
 
 Section timings mirroring the measured grid is now genuinely covered rather
-than asserted. An earlier draft claimed the alignment was "inherited rather than
-recomputed", and what was actually inherited was the chord ORDER: every bar was
-written at `index * bar_ticks` and the first measured chord on the reference
-track begins at 5.55 s, so the clip started 5.55 s early. `progression` now
-offsets the first bar by the first chord's `start_s`, and
-`test_the_clip_starts_where_the_first_measured_chord_starts` proves it. Bar
-widths still come from the measured tempo rather than from each window's own
-duration, which is correct: the windows vary between 1.44 and 3.34 s because
-the last one is a partial bar, and quantising is the point of a chord clip.
+than asserted, and it took two attempts.
+
+The first draft wrote every bar at `index * bar_ticks` and its self review
+called the alignment "inherited". What was inherited was the chord ORDER. The
+first measured chord on the reference track begins at 5.55 s, so the clip
+started 5.55 s early.
+
+The second draft offset the first bar and claimed the remaining window variation
+came from one partial bar at the end. The data says otherwise: on Wrong Turn 28
+of 52 interior windows deviate from the nominal bar and the clip accumulates
+4.114 s of drift, which one partial bar cannot produce. The cause is that the
+bar windows come from a tracked beat grid whose spacing follows the performance,
+while the clip was written at a constant nominal width.
+
+Each bar is now placed at its own `start_s` and sized to its own `end_s`.
+`test_the_clip_starts_at_the_first_measured_chord` and
+`test_the_clip_ends_where_the_last_measured_chord_ends` cover both ends, and
+`align=False` keeps the uniform behaviour for a caller that wants a quantised
+clip rather than a timeline anchor.
 
 **Placeholders.** None. Every step carries its code. Task 5 step 4 points at
 `SKILL.md`'s existing format rather than reproducing it, because that file's

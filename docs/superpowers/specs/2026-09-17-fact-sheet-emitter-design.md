@@ -68,7 +68,7 @@ Every axis emits the same shape. Nothing in the fact sheet is a bare number.
 | `stem` | Which stem carried it, or `mix` |
 | `band_hz` | `[low, high]` or `null` for full band. Declaring the band makes the assumption explicit |
 | `method` | Every method that ran, not only the one that won |
-| `confidence` | `KNOW` cross-validated by an independent second method, `INFER` single method or agreeing methods sharing a blind spot, `UNKNOWN` attempted and unresolved |
+| `confidence` | `KNOW` either cross-validated by an independent second method, or computed by a published standard whose parameters the standard itself fixes. `INFER` single method, a chosen parameter anywhere in the path, or agreeing methods sharing a blind spot. `UNKNOWN` attempted and unresolved |
 | `suno_actionable` | `direct`, `indirect`, `midi_only`, `none` |
 | `note` | Disagreement, caveat, or what the estimate cannot support |
 
@@ -78,14 +78,24 @@ shipped exactly that.
 
 Where two methods disagree, both results are reported and nothing is averaged.
 
-The second clause of `KNOW` exists because four axes compute rather than
-estimate. `loudness` is ITU-R BS.1770-4, `instrumentation` is a stem RMS,
-`spectral_balance` is a declared STFT band share and `dynamic_arc` is an RMS
-window series. None has a free parameter that could have been chosen
-differently, so a second method would return the same number by construction
-and demanding one would be theatre. Every axis that genuinely estimates, which
-is tempo, key, tuning, chords, meter and both registers, still needs the first
-clause.
+The second clause of `KNOW` covers exactly one axis: `loudness`, which is
+ITU-R BS.1770-4. The standard fixes the gating, the filter, the window and the
+aggregation, so there is no parameter anyone could have chosen differently and
+a second method would return the same number by construction.
+
+A wider version of this clause was drafted and withdrawn. It also claimed
+`instrumentation`, `spectral_balance` and `dynamic_arc` compute rather than
+estimate, on the grounds that none has a free parameter. All three do, and the
+disproof of the first arrived in the same commit as the claim:
+`instrumentation`'s presence threshold moved from 30 dB to 35 dB, and that move
+changed which stems the axis reports on two of the three corpus tracks.
+`spectral_balance` has a crossover, an FFT size and a choice between magnitude
+and power, which this project's own evidence shows span 10.83 to 58.01 percent
+on a single track. `dynamic_arc` has a window length and a normalisation target.
+
+A declared parameter is not the same as no parameter. Those three are `INFER`:
+one method, with a choice in the path. The axes that estimate, which are tempo,
+key, tuning, chords, meter and both registers, need the first clause.
 
 The axis this distinction protects is `key`. It reaches `KNOW` only when its
 template margin clears 0.05 **and** the measured chord sequence's most common

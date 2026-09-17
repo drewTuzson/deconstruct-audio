@@ -19,6 +19,14 @@ sits in `/Users/drewtuzson/Documents/Projects/deconstruct-audio-desk-2026-09-17/
 
 ## Global Constraints
 
+**Every declared test count in this plan has been wrong at least once.** Three
+revisions in, the counts are the most frequently defective thing in the
+document. They are kept because a count is a tripwire for a silently dropped
+test, but treat them as a tripwire, not as truth: run the suite, and if your
+number disagrees, say so in the pull request with the output rather than
+editing a test to reach the number.
+
+
 - Python 3.10 or newer. `ffmpeg` and `ffprobe` on `PATH`.
 - Run tests with the main checkout's interpreter: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest discover -s tests`. Worktrees do not build their own venv; `AGENTS.md` now says so.
 - Baseline is 97 tests, OK, one skipped. Any drop is a regression.
@@ -454,7 +462,7 @@ through to a looser rule that would guess.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 17 tests
+Expected: PASS, 19 tests
 
 - [ ] **Step 5: Prove it against the real corpus folders**
 
@@ -788,7 +796,7 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
     """
     y = np.asarray(y, dtype=np.float32)
     empty = {'tuning': None, 'lowest_hz': None, 'support': None,
-             'margin_cents': None, 'skipped_hz': None}
+             'margin_cents': None, 'skipped_hz': None, 'candidates': []}
     if len(y) == 0 or np.max(np.abs(y)) < SILENCE:
         return empty
     low = band_limit(y, sr, 25.0, high)
@@ -809,7 +817,17 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
     # candidate is tried against the table in pitch order and the first that
     # lands within MAX_CENTS wins, so a skipped bin is a bin no tuning
     # explains rather than a bin that was ignored.
-    skipped = []
+    # Every supported bin that the table can name, in pitch order, with its
+    # support. The lowest still wins, but the alternatives travel with the
+    # answer instead of vanishing.
+    #
+    # This is the failure the walk up traded for: the table is a contiguous
+    # chromatic run from MIDI 22 to 28, so a yin sub octave error on a bass
+    # note anywhere from A#1 to E2 lands INSIDE it, is named with a margin near
+    # zero cents, and skips nothing. The real string with six times the support
+    # two semitones up never appears. Returning the whole supported set is what
+    # makes that visible to a reader and to the note on the fact.
+    skipped, candidates = [], []
     for midi in supported:
         lowest = float(librosa.midi_to_hz(midi))
         support = float(share[values == midi][0])
@@ -817,13 +835,22 @@ def tuning_estimate(y, sr, high=200.0, floor=SUPPORT_FLOOR):
                         for name, hz in TUNINGS.items())
         best_cents, best_name = ranked[0]
         if best_cents <= MAX_CENTS:
-            return {'tuning': best_name, 'lowest_hz': round(lowest, 2),
-                    'support': round(support, 4),
-                    'margin_cents': round(best_cents, 1),
-                    'skipped_hz': skipped or None}
-        skipped.append(round(lowest, 2))
-    return {'tuning': None, 'lowest_hz': skipped[0] if skipped else None,
-            'support': None, 'margin_cents': None, 'skipped_hz': skipped}
+            candidates.append({'tuning': best_name, 'hz': round(lowest, 2),
+                               'support': round(support, 4),
+                               'cents': round(best_cents, 1)})
+        else:
+            skipped.append(round(lowest, 2))
+    if not candidates:
+        return {'tuning': None, 'lowest_hz': skipped[0] if skipped else None,
+                'support': None, 'margin_cents': None, 'skipped_hz': skipped,
+                'candidates': []}
+    chosen = candidates[0]
+    strongest = max(candidates, key=lambda c: c['support'])
+    return {'tuning': chosen['tuning'], 'lowest_hz': chosen['hz'],
+            'support': chosen['support'], 'margin_cents': chosen['cents'],
+            'skipped_hz': skipped or None, 'candidates': candidates,
+            'strongest_support_tuning': strongest['tuning'],
+            'strongest_support': strongest['support']}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -952,6 +979,10 @@ Append to `scripts/chords.py`:
 ```python
 THIRD_RATIO = 0.55   # a third must reach this share of the root's chroma to count
 FIFTH_RATIO = 0.35
+# The value a root with no runner up reports. Finite and large, because None
+# would serialise as null and the MIDI emitter reads a missing margin as no
+# confidence, which is the exact opposite of what an unbeatable root means.
+MARGIN_CAP = 99.0
 BEATS_PER_BAR = 4
 
 
@@ -1011,13 +1042,17 @@ def chord_sequence(signals, sr, beat_times, bars_per_chord=1,
         # however healthy its share looks.
         ordered = np.sort(profile)[::-1]
         second = float(ordered[1]) if len(ordered) > 1 else 0.0
-        margin = float(root_energy / second) if second > 0 else float('inf')
+        # Capped, never None and never inf. An unbeatable root is the most
+        # confident reading there is, and emitting None for it collides head on
+        # with the MIDI emitter, which reads a missing margin as no confidence
+        # and replaces the chord with a sustained root. The two would have meant
+        # exact opposites through the same field.
+        margin = (root_energy / second) if second > 0 else MARGIN_CAP
         out.append({'start_s': round(float(start), 3),
                     'end_s': round(float(end), 3),
                     'root': NOTES[root], 'quality': quality,
                     'root_share': round(root_energy, 4),
-                    'root_margin': (round(margin, 3)
-                                    if math.isfinite(margin) else None),
+                    'root_margin': round(min(float(margin), MARGIN_CAP), 3),
                     'third_present': third_present,
                     'fifth_present': bool(fifth >= FIFTH_RATIO)})
     return out
@@ -1050,7 +1085,7 @@ def harmonic_rhythm(sequence):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_chords -v`
-Expected: PASS, 21 tests
+Expected: PASS, 22 tests
 
 `THIRD_RATIO` at 0.55 is a starting value, not a measured one. If a synthetic
 triad test fails, print the three ratios for that fixture and set the constant
@@ -1257,8 +1292,14 @@ ACTIVE_DB = -40.0
 INTRO_SNAP_S = 4.0
 # An intro lives near the beginning. Without a window, a post breakdown re
 # entry two thirds of the way through a track competes with it and wins.
+# INTRO_WINDOW_S is a count of one second windows, and the two coincide only
+# because `window = int(sr)` below. If the window size ever changes, convert.
 INTRO_WINDOW_S = 60.0
 INTRO_WINDOW_FRACTION = 0.4
+# The working density of the mix. Deliberately not the median: an intro that
+# occupies half or more of the track makes the median equal to the intro's own
+# density, and the no-intro guard then fires on the longest intros.
+INTRO_TYPICAL_PERCENTILE = 75
 # The winning beat grouping must beat the runner up by this ratio. Measured: on
 # the reference track 3 scores 16526.6 against 4 at 14573.1, a ratio of 1.134,
 # and the axis reads 3 on two of three tracks in a genre whose prior is
@@ -1422,10 +1463,17 @@ def _tuning_fact(paths, loaded, mix, sr, local, built):
     return fact(result['tuning'], 'name', 'bass', ['yin-semitone-histogram'],
                 'INFER', 'direct', band_hz=band,
                 note=f'lowest sustained semitone {result["lowest_hz"]} Hz with '
-                     f'{result["support"]:.3f} frame support, {result["margin_cents"]} '
-                     f'cents from the template. Read from the bass only: the '
-                     f'guitar stem is dominated by yin octave errors in this '
-                     f'band and cannot corroborate it.')
+                     f'{result["support"]:.3f} frame support, '
+                     f'{result["margin_cents"]} cents from the template. '
+                     f'Every supported candidate: '
+                     f'{", ".join(str(c) for c in result["candidates"])}. '
+                     f'The best supported was '
+                     f'{result["strongest_support_tuning"]} at '
+                     f'{result["strongest_support"]:.3f}. Read from the bass '
+                     f'only: the guitar stem is dominated by yin octave errors '
+                     f'in this band and cannot corroborate it. A sub octave '
+                     f'artifact landing inside the table is named with a small '
+                     f'cents margin and is only visible in this list.')
 ```
 
 Graded `INFER`, never `KNOW`. Revision 1 graded it `KNOW` when both stems agreed
@@ -1519,26 +1567,38 @@ def _intro_fact(paths, loaded, mix, sr, local, built):
     density = [sum(1 for y in loaded.values()
                    if _rms_db(y[i * window:(i + 1) * window]) > ACTIVE_DB)
                for i in range(count)]
-    typical = float(np.median(np.asarray(density)))
+    # The 75th percentile, not the median. With the median, an intro occupying
+    # half or more of the windows IS the median, the no-intro guard fires, and
+    # a 60 s track with a 35 s intro reports zero. The guard misfired exactly
+    # on the tracks with the longest intros.
+    typical = float(np.percentile(np.asarray(density), INTRO_TYPICAL_PERCENTILE))
+    if typical <= 0:
+        return fact(None, 'seconds', 'mix', ['stem-density-step'], 'UNKNOWN',
+                    'direct',
+                    note='the working density of this mix is zero stems, which '
+                         'means nothing was measured rather than that the intro '
+                         'is zero seconds long')
 
     if density[0] >= typical:
         return fact(0.0, 'seconds', 'mix', ['stem-density-step'], 'INFER',
                     'direct',
-                    note=f'the arrangement is already at its typical density of '
+                    note=f'the arrangement is already at its working density of '
                          f'{typical:g} stems in the first window, so there is no '
                          f'intro to measure')
 
+    # The first window that REACHES the working density, not the largest step
+    # on the way there. A step rule takes the earliest of equal steps, so a
+    # 30 s fade in through six equal steps reported 5 s, and a two second
+    # flourish before the real entry beat the real entry.
     limit = max(1, int(min(INTRO_WINDOW_S, INTRO_WINDOW_FRACTION * count)))
-    steps = np.diff(np.asarray(density))
-    candidates = [(int(steps[i]), i + 1) for i in range(min(len(steps), limit))
-                  if steps[i] > 0 and density[i] < typical]
-    if not candidates:
+    reached = [i for i in range(min(count, limit)) if density[i] >= typical]
+    if not reached:
         return fact(None, 'seconds', 'mix', ['stem-density-step'], 'UNKNOWN',
                     'direct',
-                    note=f'no density step out of a thin passage in the first '
-                         f'{limit} s')
-    size, raw_index = max(candidates, key=lambda c: (c[0], -c[1]))
-    raw = float(raw_index)
+                    note=f'the arrangement never reaches its working density of '
+                         f'{typical:g} stems within the first {limit} s')
+    raw = float(reached[0])
+    size = int(density[reached[0]] - density[0])
     boundaries = (built.get('section_boundaries') or {}).get('value') or []
     near = [b for b in boundaries if abs(b - raw) <= INTRO_SNAP_S]
     if near:
@@ -1556,18 +1616,33 @@ def _intro_fact(paths, loaded, mix, sr, local, built):
                      f'section boundary within {INTRO_SNAP_S:g} s to confirm it')
 ```
 
-Measured on all three corpus tracks before being written here:
+Measured on all three corpus tracks AND on nine synthetic shapes before being
+written here. The corpus alone cannot validate this axis: only one track has
+ground truth, so a rule can fit that track and be wrong everywhere else, which
+is what the two earlier versions did.
 
-| Track | Duration | Typical density | First window | Result |
-|---|---|---|---|---|
-| Murder, She Wrote | 138 s | 4 | 1 stem | 12 s, snapped to 12.12, known 12.1 |
-| Wrong Turn | 153 s | 4 | 0 stems | 4 s |
-| The Danger of Caring | 205 s | 4 | 5 stems | 0.0, no intro |
+| Shape | Truth | Result |
+|---|---|---|
+| Murder, She Wrote, real | 12.1 | 12.12 after snap |
+| Wrong Turn, real | unknown | 5, snapped to 4.18 |
+| The Danger of Caring, real | no intro | 0.0 |
+| 6 s at density 2, then 5 s at 5 | 6 | 6.0 |
+| 35 s at 1, then 25 s at 5 | 35 | 35.0 |
+| 20 s at 1, then 100 s at 5 | 20 | 20.0 |
+| 40 s silent, then 20 s at 4 | 40 | 40.0 |
+| fade 1 to 6 over 30 s, then 6 | 25 | 25.0 |
+| 2 s flourish at 3, then 4 forever | 6 | 6.0 |
+| 70 s at 1, then 80 s at 4 | 70 | 70.0 |
 
-The grade is `INFER` in every branch. Revision 2 granted `KNOW` when a section
-boundary sat within 4 s, and on The Danger of Caring a boundary sat 0.41 s from
-a wrong answer. Two methods agreeing on a position is not cross validation of a
-length.
+The three shapes in the middle are the ones that killed the previous version.
+A median-based typical density reported 0.0 for the 35 s intro and for the
+silent opening, and a largest-step rule reported 5 s for the fade and 1 s for
+the flourish.
+
+The grade is `INFER` in every branch. An earlier version granted `KNOW` when a
+section boundary sat within 4 s, and on The Danger of Caring a boundary sat
+0.41 s from a wrong answer. Two methods agreeing on a position is not cross
+validation of a length.
 
 ```python
 def _loudness_fact(paths, loaded, mix, sr, local, built):
@@ -1640,11 +1715,11 @@ def _meter_fact(paths, loaded, mix, sr, local, built):
     bpm = (built.get('tempo') or {}).get('value')
     if not bpm or bpm <= 0:
         return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
-                    'UNKNOWN', 'direct', note='no tempo to group beats against')
+                    'UNKNOWN', 'none', note='no tempo to group beats against')
     onset = librosa.onset.onset_strength(y=loaded['drums'], sr=sr)
     if not len(onset) or float(np.max(onset)) <= 1e-5:
         return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
-                    'UNKNOWN', 'direct', note='no onsets in the drums stem')
+                    'UNKNOWN', 'none', note='no onsets in the drums stem')
     hop = 512
     frames_per_beat = (60.0 / float(bpm)) * sr / hop
     ac = librosa.autocorrelate(onset - onset.mean())
@@ -1658,10 +1733,10 @@ def _meter_fact(paths, loaded, mix, sr, local, built):
     detail = ', '.join(f'{k} scored {v:.3f}' for k, v in sorted(scores.items()))
     if not math.isfinite(best_score) or runner_score <= 0:
         return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
-                    'UNKNOWN', 'direct', note='autocorrelation lag out of range')
+                    'UNKNOWN', 'none', note='autocorrelation lag out of range')
     if best_score / runner_score < METER_MARGIN:
         return fact(None, 'beats_per_bar', 'drums', ['onset-autocorrelation'],
-                    'UNKNOWN', 'direct',
+                    'UNKNOWN', 'none',
                     note=f'{detail}, a margin of '
                          f'{best_score / runner_score:.3f} which is under '
                          f'{METER_MARGIN}. Unnormalised autocorrelation at two '
@@ -1801,7 +1876,7 @@ def render_markdown(sheet):
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_facts -v`
-Expected: PASS, 28 tests
+Expected: PASS, 30 tests
 
 If `test_two_runs_on_the_same_audio_agree_apart_from_the_timestamp` fails, do not
 round harder until it passes. Find which axis moved, name the stochastic step
