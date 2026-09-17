@@ -1401,10 +1401,21 @@ def _holds(density, index, typical, hold=INTRO_HOLD):
 
     One window at the working density is not an arrangement. It is a stab, a
     cymbal swell, or a sample. The hold is what separates the two, and it is
-    the single change that closed the last four intro failures.
+    the single change that closed four consecutive intro failures.
+
+    The refusal at the end of the array is not a detail. An earlier version
+    truncated the range with min(len(density), index + hold), so at the last
+    index the range had length one and a SINGLE window satisfied a predicate
+    whose entire purpose is to reject single windows. A track ending on a full
+    band hit then reported almost its whole length as intro, and an identical
+    two window run was rejected mid track and accepted at the end.
+
+    The trade is deliberate and correct: an arrangement that arrives in the
+    last two seconds of a track is not an intro ending.
     """
-    end = min(len(density), index + hold)
-    return all(density[j] >= typical for j in range(index, end))
+    if index + hold > len(density):
+        return False
+    return all(density[j] >= typical for j in range(index, index + hold))
 
 
 def _register(y, sr, fmin, fmax, stem, band, actionable):
@@ -1629,20 +1640,34 @@ is the legitimate use of `UNKNOWN`: a method that genuinely cannot resolve.
 
 ```python
 def _intro_fact(paths, loaded, mix, sr, local, built):
-    """How long before the arrangement reaches its working density.
+    """How long before the arrangement reaches and holds its working density.
 
-    Three guards, each closing a way this returned a confident wrong answer.
+    Five versions of this axis have shipped a confidently wrong answer, each in
+    a different direction, and the corpus passed every one of them. What the
+    current rule is made of, and what each part is for:
 
-    The track may have no intro. The Danger of Caring is at density 5 in its
-    first second and never rises again; its only density increases are a
-    post breakdown re entry at 123 s and another at 151 s. Revision 2 returned
-    123.41 s on a 205.8 s track and graded it KNOW.
+    A working density taken at the 90th percentile, not the median. Any
+    percentile at or below the share of the track the intro occupies makes the
+    intro its own working density, and the no intro guard then fires on exactly
+    the tracks with the longest intros. The median failed that at 50 percent
+    and the 75th percentile failed on a track that is 77 percent sparse.
 
-    The step must be near the beginning. An intro is a position, not just a
-    shape, and without a window any later re entry competes with it.
+    A track may have no intro at all. The Danger of Caring is at density 5 in
+    its first second and never rises again. An earlier version reported 123.41 s
+    on that 205.8 s track, and graded it KNOW because a section boundary
+    happened to sit 0.41 s away.
 
-    The step must rise OUT of a thin passage. A step from an already typical
-    density is an arrangement change, not the end of an intro.
+    Reaching the working density is not enough; it must be HELD. A one second
+    full band stab before the real entry is a genre commonplace and defeats a
+    single touch, exactly as a large early step defeated the version before.
+
+    No search window. Under a first reach rule the first qualifying index is by
+    construction the earliest, so a window can only turn a correct answer into
+    UNKNOWN. It cost four of them and bought nothing.
+
+    The grade is INFER in every branch, including when a section boundary
+    confirms the position. Two methods agreeing on a position is not cross
+    validation of a length.
     """
     window = int(sr)
     count = min(len(y) for y in loaded.values()) // window
@@ -1722,9 +1747,18 @@ is what the two earlier versions did.
 | 1 s stab at 5 in the intro, real entry at 20 | 20 | 20.0 |
 | stab at 5 in window 0, then 20 s sparse | 21 | 21.0 |
 | 100 s sparse, then 30 s dense | 100 | 100.0 |
+| 180 s sparse, then 20 s dense | 180 | 180.0 |
+| 10 s intro, then accents, ending on an accent | no clean answer | UNKNOWN |
+| two short runs at working density, last at the very end | no clean answer | UNKNOWN |
 
-Twelve of twelve, and the corpus answers are identical at percentile 90 and 95
-and at hold 2, 3, 4 and 5.
+Fifteen of fifteen, and the corpus answers are identical across every
+combination of percentile 85, 90 and 95 with hold 2, 3, 4 and 5. Twelve
+parameter combinations, one answer per track.
+
+The last two rows are the ones that found the truncation bug in `_holds`. A
+track ending on a full band hit reported almost its entire length as intro,
+because at the final index the hold range had length one and a single window
+satisfied a predicate built to reject single windows.
 
 **This table was re-measured against the rule as written here.** The previous
 revision's table was transcribed from a review of a slightly different rule,
@@ -2071,6 +2105,13 @@ And add the cross check to `tests/test_facts.py`, inside `SheetTests`:
         for axis in projected:
             self.assertIn(axis, compare.GATES, f'{axis} is not a compare axis')
 ```
+
+What it does not cover: it iterates the RESOLVED projection, so an axis that
+came back `UNKNOWN` on the fixture would never be checked against
+`compare.GATES` at all. On the current fixture that is not a live gap, because
+`tuning` does resolve and is present in the projected set. If you add a
+projection target that the fixture cannot resolve, check it against `GATES`
+some other way or the typo will not surface here.
 
 It lives here rather than in Task 5 because `facts.PROJECTION` already carries
 `tuning` while `compare.GATES` does not gain its gate until this task. Written
