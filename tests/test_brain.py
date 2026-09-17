@@ -434,6 +434,28 @@ class TempoLevelTests(unittest.TestCase):
         self.assertEqual([l['bpm'] for l in levels], [80.7, 161.5])
         self.assertIsNone(levels[1]['relative_strength'])
 
+    def test_two_levels_equidistant_from_the_choice_do_not_crash(self):
+        # Sorting (distance, level) tuples fell through to comparing the dicts
+        # when the distances tied, which raises TypeError and reaches the user
+        # as 'Details suppressed to protect secrets'. A tie needs the levels
+        # exactly 2 * TEMPO_MATCH_BPM apart, which the ratios of a real primary
+        # never are, but a hand edited note is not bound by that.
+        tied = {'value': 80.7,
+                'note': '2x at 161.0 BPM (tempogram relative strength 0.90); '
+                        '3x at 162.0 BPM (tempogram relative strength 0.80)'}
+        self.assertEqual(abs(161.0 - 161.5), abs(162.0 - 161.5))
+        chosen = b.select_tempo_level(tied, 161.5)
+        self.assertEqual(chosen['bpm'], 161.0)
+        # Stable, so the same input always resolves the same way.
+        self.assertEqual(b.select_tempo_level(tied, 161.5), chosen)
+
+    def test_the_nearest_level_wins_when_two_are_in_range(self):
+        near = {'value': 80.7,
+                'note': '2x at 161.0 BPM (tempogram relative strength 0.90); '
+                        '3x at 161.8 BPM (tempogram relative strength 0.80)'}
+        self.assertEqual(b.select_tempo_level(near, 161.7)['bpm'], 161.8)
+        self.assertEqual(b.select_tempo_level(near, 161.1)['bpm'], 161.0)
+
     def test_a_thin_set_is_only_explained_when_that_is_why(self):
         # The ratio-only sentence must not be offered as the reason whenever
         # the set happens to be small, because that would confidently explain

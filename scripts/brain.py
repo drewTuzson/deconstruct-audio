@@ -447,10 +447,18 @@ def select_tempo_level(entry, wanted):
         raise BrainError(
             'This sheet reports no usable tempo, so there is no level to '
             'select. Compose without a BPM.')
-    hits = sorted((abs(level['bpm'] - target), level) for level in levels
-                  if abs(level['bpm'] - target) <= TEMPO_MATCH_BPM)
+    # min with a key, never sorted on (distance, level) tuples. Two levels
+    # equidistant from the target made Python fall through to comparing the
+    # dicts, which raises TypeError and reaches the user as 'Details
+    # suppressed to protect secrets'. A tie needs the two levels to sit exactly
+    # 2 * TEMPO_MATCH_BPM apart, which the ratios of a real primary never are,
+    # but a hand edited note is not bound by that and a crash is not an
+    # acceptable answer to one. min is also stable, so a tie resolves to the
+    # earlier level rather than to whichever way a sort happened to fall.
+    hits = [level for level in levels
+            if abs(level['bpm'] - target) <= TEMPO_MATCH_BPM]
     if hits:
-        return dict(hits[0][1])
+        return dict(min(hits, key=lambda level: abs(level['bpm'] - target)))
     offered = ', '.join(f'{level["bpm"]} ({level["source"]})'
                         for level in levels)
     # Say WHY the set is thin, but only when it actually is: a note that names
