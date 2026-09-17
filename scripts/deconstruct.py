@@ -606,7 +606,11 @@ def cmd_midi(args):
     # every command fail at import time on an incomplete install, doctor
     # included, and doctor is what diagnoses that state.
     import midi_emit
-    sheet = json.loads(args.facts.read_text(encoding='utf-8'))
+    # read_facts, not a bare json.loads. A typo in the path reaches the
+    # top-level handler as a FileNotFoundError and prints "Details suppressed
+    # to protect secrets", which is the exact failure read_facts was written to
+    # stop, and there is no secret in a path the user just typed.
+    sheet = read_facts(args.facts, 'input')
     out = args.out or args.facts.parent / 'progression.mid'
     try:
         midi_emit.progression(sheet, octave=args.octave).save(str(out))
