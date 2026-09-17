@@ -19,6 +19,12 @@ import unicodedata
 import uuid
 import warnings
 
+# stems and tempo are imported inside the commands that need them, never here.
+# tempo pulls in librosa and numpy, so a module-level import would make every
+# command, doctor included, fail at import time on an incomplete install. That
+# is precisely the state doctor exists to diagnose, and the failure would land
+# before the top-level handler, printing a raw traceback with local paths.
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = 'gemini-3.8-flash'
 
@@ -48,9 +54,29 @@ def config():
         raise SkillError('Invalid config.json settings. Move that settings file aside and rerun onboarding; keep credentials.json private and unchanged.')
     return value
 
-def save_config(value):
-    folder = config_dir()
+def secure_dir(folder, what):
+    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt' and folder.stat().st_mode & 0o077:
+        try:
+            folder.chmod(0o700)
+        except OSError:
+            raise SkillError('The ' + what + ' is readable by other users and its permissions could not be tightened. Run chmod 700 on ' + str(folder) + '.') from None
+    return folder
+
+def secure_config_dir():
+    """The private directory, tightened by whichever command reaches it first.
+
+    mkdir(parents=True, mode=) sets the mode on the leaf only, and no-ops
+    entirely on a directory that already exists. separate creating its stem
+    cache underneath therefore left the folder that later holds
+    credentials.json at 0755 for good, because save_config and set_key hand
+    their mode= to a mkdir that never runs.
+    """
+    return secure_dir(config_dir(), 'configuration directory')
+
+def save_config(value):
+    folder = secure_config_dir()
     target = folder / 'config.json'
     fd, name = tempfile.mkstemp(dir=folder)
     try:
@@ -94,8 +120,7 @@ def set_key():
         value = getpass.getpass('Gemini API key (hidden): ').strip()
     if not value or any(c.isspace() for c in value):
         raise SkillError('Key was empty or contained whitespace. Nothing saved.')
-    folder = config_dir()
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    folder = secure_config_dir()
     fd, name = tempfile.mkstemp(dir=folder)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -269,10 +294,13 @@ def brain_sources(path):
 def doctor():
     checks = {'python': sys.version.split()[0], 'ffmpeg': bool(shutil.which('ffmpeg')),
               'ffprobe': bool(shutil.which('ffprobe'))}
-    for module in ('numpy', 'librosa', 'soundfile', 'google.genai'):
+    # demucs and torch are the separation dependencies this skill added, and a
+    # missing demucs is the dominant first-run failure: it is a multi-gigabyte
+    # install that separate, and tempo --from-drums through it, both need.
+    for module in ('numpy', 'librosa', 'soundfile', 'google.genai', 'demucs', 'torch'):
         try:
             checks[module] = importlib.util.find_spec(module) is not None
-        except ModuleNotFoundError:
+        except (ImportError, ValueError):
             checks[module] = False
     try:
         checks['key_present_not_verified'] = bool(api_key())
@@ -365,15 +393,9 @@ def valid_style(value):
     )
 
 def secure_styles_dir():
-    """mode= only applies when mkdir creates the folder, so tighten an existing one."""
-    folder = styles_dir()
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name != 'nt' and folder.stat().st_mode & 0o077:
-        try:
-            folder.chmod(0o700)
-        except OSError:
-            raise SkillError('The saved styles folder is readable by other users and its permissions could not be tightened. Run chmod 700 on that folder.') from None
-    return folder
+    """Secure the parent before the leaf, so neither is left world-readable."""
+    secure_config_dir()
+    return secure_dir(styles_dir(), 'saved styles folder')
 
 def write_style(value):
     """Atomic replace so an interrupted write never truncates a saved style."""
@@ -500,6 +522,84 @@ def cmd_delete_style(args):
     p.unlink()
     print('STYLE_DELETED ' + style_slug(args.name) + '. This cannot be undone.')
 
+def read_facts(path, role):
+    """Load one side of a comparison. A fact sheet is a JSON object of axes.
+
+    Every failure here is authored. An unreadable path used to reach the
+    top-level handler as a bare FileNotFoundError and print 'Details
+    suppressed to protect secrets', which tells a user nothing about the
+    typo in their path.
+    """
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        raise SkillError('Cannot read the ' + role + ' fact sheet: ' + str(path)
+                         + '. Supply a readable JSON file of measured axes.') from None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        raise SkillError('The ' + role + ' fact sheet is not valid JSON: ' + str(path) + '.') from None
+    if not isinstance(value, dict):
+        raise SkillError('The ' + role + ' fact sheet must be a JSON object of '
+                         'measured axes: ' + str(path) + '.')
+    return value
+
+def cmd_separate(args):
+    import stems
+    out = args.out or (secure_config_dir() / 'cache')
+    try:
+        paths = stems.separate(args.audio, out)
+    except stems.SeparationError as e:
+        raise SkillError(str(e)) from None
+    for name in stems.STEM_NAMES:
+        print(f'STEM_{name.upper()}={paths[name]}')
+
+
+def cmd_tempo(args):
+    import stems
+    import tempo as tempo_mod
+    target = args.audio
+    if args.from_drums:
+        try:
+            target = stems.separate(args.audio, secure_config_dir() / 'cache')['drums']
+        except stems.SeparationError as e:
+            raise SkillError(str(e)) from None
+        print(f'TEMPO_SOURCE={target}', file=sys.stderr)
+    elif not Path(target).is_file():
+        # Same sentence separate gives, so the three commands fail alike.
+        raise SkillError(f'No such audio file: {target}')
+    try:
+        result = tempo_mod.tempo_family(target)
+    except Exception:
+        # librosa and soundfile decoder errors name virtualenv paths and
+        # library internals. The user gets the one sentence that fixes it.
+        raise SkillError(f'Could not measure tempo from {target}. Supply a '
+                         'decodable audio file, and run doctor if librosa or '
+                         'soundfile is missing.') from None
+    print(json.dumps(result, indent=2))
+
+# compare's exit code carries the verdict, so a wrapping script can gate on it
+# without parsing stdout. 1 stays what it means for every other command: the
+# command itself failed. UNKNOWN is its own code because "nothing was measured
+# on both sides" is a different answer from "it failed", and a gate that
+# conflated them would pass a comparison that never happened.
+COMPARE_EXIT = {'PASS': 0, 'FAIL': 2, 'WARN': 3, 'UNKNOWN': 4}
+
+def cmd_compare(args):
+    import compare as compare_mod
+    reference = read_facts(args.reference, 'reference')
+    candidate = read_facts(args.candidate, 'candidate')
+    result = compare_mod.score(reference, candidate)
+    # Echoed because the two positionals are interchangeable at the shell and
+    # a swapped pair still produces a full, plausible, silently inverted report.
+    print(f'REFERENCE={args.reference}')
+    print(f'CANDIDATE={args.candidate}')
+    for axis in result['axes']:
+        print(f'{axis["verdict"]:<8}{axis["label"]:<18}{axis["note"]}')
+    print(f'MEASURED={result["measured"]} UNMEASURED={result["unmeasured"]}')
+    print(f'VERDICT={result["verdict"]}')
+    return COMPARE_EXIT.get(result['verdict'], 4)
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
@@ -511,6 +611,26 @@ def main():
     a.add_argument('--local-only', action='store_true')
     b = sub.add_parser('connect-brain'); b.add_argument('path', type=Path)
     m = sub.add_parser('set-model'); m.add_argument('model')
+    sp = sub.add_parser('separate')
+    sp.add_argument('audio', type=Path)
+    sp.add_argument('--out', type=Path, default=None)
+    tp = sub.add_parser('tempo')
+    tp.add_argument('audio', type=Path)
+    tp.add_argument('--from-drums', action='store_true',
+                    help='Separate first and measure the drums stem. Recommended.')
+    cp = sub.add_parser(
+        'compare',
+        help='Score a candidate track against a reference, on measured axes only.',
+        description='Score a candidate track against a reference fact sheet. Order '
+                    'matters and is not detectable from the files: the reference '
+                    'comes first. Axes missing from either side are reported '
+                    'UNMEASURED rather than scored. Exit code carries the verdict: '
+                    '0 PASS, 2 FAIL, 3 WARN, 4 UNKNOWN (no axis measured on both '
+                    'sides), 1 the command itself failed.')
+    cp.add_argument('reference', type=Path,
+                    help='Fact sheet of the reference track, the one being matched.')
+    cp.add_argument('candidate', type=Path,
+                    help='Fact sheet of the candidate track, the generation being scored.')
     sub.add_parser('list-styles')
     s = sub.add_parser('save-style')
     s.add_argument('name')
@@ -552,6 +672,12 @@ def main():
             raise SkillError('Invalid model ID.')
         cfg = config(); cfg['model'] = args.model; cfg['onboarding_complete'] = False
         save_config(cfg); print('MODEL_SAVED. Run verify before use.')
+    elif args.command == 'separate':
+        cmd_separate(args)
+    elif args.command == 'tempo':
+        cmd_tempo(args)
+    elif args.command == 'compare':
+        return cmd_compare(args)
     elif args.command == 'connect-brain':
         root, sources = brain_sources(args.path)
         cfg = config(); cfg['brain_path'] = str(root); save_config(cfg)
@@ -587,7 +713,7 @@ if __name__ == '__main__':
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='backslashreplace')
     try:
-        main()
+        sys.exit(main() or 0)
     except KeyboardInterrupt:
         sys.exit('Cancelled. No automatic retry.')
     except Exception as exc:
