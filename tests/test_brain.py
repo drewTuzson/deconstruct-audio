@@ -635,6 +635,28 @@ class ValidatorTests(unittest.TestCase):
         results = self.run_it(style=invented)
         self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
 
+    def test_a_slot_sentence_carrying_a_comma_survives_decomposition(self):
+        # The shape the real reference sheet produces. Its section count is
+        # UNKNOWN, so the second direction sentence comes from the boundaries
+        # branch and carries a comma. _decompose splits the tag stack on commas
+        # and the prose on sentence ends, so a comma inside a slot SENTENCE
+        # must not break it into pieces that then read as unaccounted. Nothing
+        # covered this, and it would have surfaced at the expensive moment.
+        sheet = _sheet_with(section_boundaries={
+            'value': [0.0, 7.8, 12.1, 32.9, 57.5, 69.7, 107.8, 134.5],
+            'unit': 's', 'confidence': 'INFER', 'suno_actionable': 'direct'})
+        filled = b.slots(sheet)
+        self.assertIn(',', filled['direction'][1])
+        tags = [p for key in b.SLOT_KEYS for p in filled[key]
+                if p not in filled['direction']]
+        style = ', '.join(tags) + '. ' + ' '.join(filled['direction'])
+        results = b.validate(style, GOOD_EXCLUDE, SHEET, rules(), filled=filled)
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'PASS', entry['detail'])
+        self.assertIn('0 unaccounted', entry['detail'])
+        self.assertIn('0 slot phrases silently unused', entry['detail'])
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
+
     def test_declared_judgement_passes_and_is_counted_separately(self):
         results = self.run_it(declared=GOOD_DECLARED)
         entry = check(results, 'provenance')
