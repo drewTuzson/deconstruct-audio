@@ -1,4 +1,6 @@
 from pathlib import Path
+from unittest.mock import patch
+import json
 import sys
 import unittest
 
@@ -336,3 +338,87 @@ class SheetTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TempoAxisPairTests(unittest.TestCase):
+    """The builder contract the two tempo axes share.
+
+    tempo and tempo_family describe one measurement, so _tempo_fact takes it
+    once and parks the family fact for the tempo_family builder to hand back.
+    That makes the pair load bearing on BUILDERS order and on there being
+    exactly one tempo_family() call, and nothing else in the suite would notice
+    a reorder: every other test builds a family axis by hand.
+    """
+
+    RESULT = {'primary': 80.7, 'confidence': 'INFER',
+              'disagreement': 'a competing metrical level',
+              'family': [{'bpm': 161.5, 'ratio': '2x', 'method': 'tempogram',
+                          'relative_strength': 0.9},
+                         {'bpm': 107.7, 'ratio': '4/3',
+                          'method': 'beat_track'}]}
+
+    def build(self):
+        """Run the BUILDERS in their real order, over one mocked measurement."""
+        calls = []
+
+        def fake_tempo_family(path):
+            calls.append(path)
+            return json.loads(json.dumps(self.RESULT))
+
+        built, paths = {}, {'drums': 'drums.wav'}
+        with patch.object(f.tempo_mod, 'tempo_family', fake_tempo_family):
+            for name, builder in f.BUILDERS:
+                if name not in ('tempo', 'tempo_family'):
+                    continue
+                built[name] = builder(paths, {}, None, 44100, {}, built)
+        return built, calls
+
+    def test_tempo_is_built_before_its_family(self):
+        order = [name for name, _ in f.BUILDERS]
+        self.assertLess(order.index('tempo'), order.index('tempo_family'))
+
+    def test_one_measurement_produces_both_axes(self):
+        # A second call would double the drums analysis and could disagree with
+        # the first, leaving two axes describing one measurement out of step
+        # inside a single sheet.
+        built, calls = self.build()
+        self.assertEqual(calls, ['drums.wav'])
+        self.assertEqual(set(built), {'tempo', 'tempo_family'})
+
+    def test_the_primary_axis_keeps_its_shape(self):
+        built, _ = self.build()
+        tempo = built['tempo']
+        self.assertEqual(tempo['value'], 80.7)
+        self.assertIsInstance(tempo['value'], float)
+        self.assertEqual(tempo['unit'], 'bpm')
+        self.assertEqual(tempo['suno_actionable'], 'direct')
+        self.assertEqual(tempo['note'], 'a competing metrical level')
+
+    def test_the_family_axis_carries_the_members_and_matches_the_grade(self):
+        built, _ = self.build()
+        tempo, family = built['tempo'], built['tempo_family']
+        self.assertEqual(family['confidence'], tempo['confidence'])
+        self.assertEqual(family['unit'], 'members')
+        self.assertEqual(family['stem'], tempo['stem'])
+        self.assertEqual(family['method'], tempo['method'])
+        # 'none' because a level chosen here reaches a prompt through tempo.
+        self.assertEqual(family['suno_actionable'], 'none')
+        self.assertEqual([m['bpm'] for m in family['value']], [161.5, 107.7])
+        self.assertEqual(family['value'][0]['relative_strength'], 0.9)
+        # A member whose method supplies no strength still carries the key.
+        self.assertIsNone(family['value'][1]['relative_strength'])
+
+    def test_the_family_axis_is_not_projected_for_compare(self):
+        self.assertNotIn('tempo_family', f.PROJECTION)
+
+    def test_a_broken_builder_order_raises_rather_than_emitting_nothing(self):
+        with self.assertRaises(f.FactError) as caught:
+            f._tempo_family_fact({'drums': 'drums.wav'}, {}, None, 44100, {}, {})
+        self.assertIn('after tempo', str(caught.exception))
+
+    def test_an_empty_family_is_a_fact_rather_than_an_error(self):
+        result = dict(self.RESULT, family=[], confidence='KNOW',
+                      disagreement=None)
+        entry = f._tempo_family_fact_from(result)
+        self.assertEqual(entry['value'], [])
+        self.assertEqual(entry['confidence'], 'KNOW')
