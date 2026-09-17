@@ -540,6 +540,25 @@ class TempoLevelTests(unittest.TestCase):
             b.slots(sheet, tempo_level=161.5)
         self.assertIn('graded UNKNOWN', str(caught.exception))
 
+    def test_every_unusable_shape_of_the_axis_gets_its_own_sentence(self):
+        # An axis that is present but unusable must not be reported as absent,
+        # which recommends regenerating a sheet whose real problem is its data,
+        # and must not go unexplained either.
+        cases = {
+            'no tempo_family axis': None,
+            'not a fact object': 'a string where a fact should be',
+            'graded UNKNOWN': _family_axis(confidence='UNKNOWN'),
+            'carries no list of members': _family_axis(members=None,
+                                                       **{'value': None}),
+        }
+        for expected, family in cases.items():
+            with self.assertRaises(b.BrainError) as caught:
+                b.select_tempo_level(INFER_TEMPO, family, 161.5)
+            message = str(caught.exception)
+            self.assertIn(expected, message, expected)
+            if expected != 'no tempo_family axis':
+                self.assertNotIn('Rerun facts', message, expected)
+
     def test_a_tempo_with_no_competing_level_offers_only_its_primary(self):
         plain = {'value': 80.7, 'unit': 'bpm', 'confidence': 'KNOW',
                  'suno_actionable': 'direct', 'note': None}

@@ -480,10 +480,18 @@ def select_tempo_level(tempo, family, wanted):
         thin = ('; this sheet has no tempo_family axis, so it predates the '
                 'axis that carries the family. Rerun facts to select a level '
                 'other than the primary')
-    elif isinstance(family, dict) and family.get('confidence') == 'UNKNOWN':
+    elif not isinstance(family, dict):
+        thin = ('; this sheet\'s tempo_family axis is not a fact object, so '
+                'no level can be read from it. That is a problem with the '
+                'sheet rather than with the measurement')
+    elif family.get('confidence') == 'UNKNOWN':
         thin = ('; this sheet\'s tempo_family axis is graded UNKNOWN, so the '
                 'measurement did not resolve a family and only the primary is '
                 'selectable')
+    elif not isinstance(family.get('value'), list):
+        thin = ('; this sheet\'s tempo_family axis carries no list of '
+                'members, so no level can be read from it. That is a problem '
+                'with the sheet rather than with the measurement')
     elif dropped:
         thin = (f'; {dropped} family member(s) carry no readable bpm and are '
                 f'not selectable')
