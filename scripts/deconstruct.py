@@ -610,6 +610,13 @@ def cmd_midi(args):
     # top-level handler as a FileNotFoundError and prints "Details suppressed
     # to protect secrets", which is the exact failure read_facts was written to
     # stop, and there is no secret in a path the user just typed.
+    # Check the octave before reading anything. The range belongs to midi_emit,
+    # which knows why it is what it is, so this asks that module rather than
+    # restating the bounds here and creating a second place to keep them right.
+    try:
+        midi_emit.check_octave(args.octave)
+    except midi_emit.MidiEmitError as exc:
+        raise SkillError(str(exc)) from None
     sheet = read_facts(args.facts, 'input')
     out = args.out or args.facts.parent / 'progression.mid'
     try:
@@ -678,7 +685,8 @@ def main():
     mi.add_argument('facts', type=Path, help='Fact sheet written by the facts command.')
     mi.add_argument('--out', type=Path, default=None,
                     help='Output file. Defaults to progression.mid beside the fact sheet.')
-    mi.add_argument('--octave', type=int, default=3, help='Octave of the chord roots.')
+    mi.add_argument('--octave', type=int, default=3,
+                    help='Octave of the chord roots, -1 to 8. Outside that range the root or its fifth leaves the MIDI range, and the command says so rather than moving your music quietly.')
     args = p.parse_args()
     if args.command == 'doctor':
         doctor()

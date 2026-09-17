@@ -21,6 +21,12 @@ import mido
 NOTES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
 FLATS = {'DB': 'C#', 'EB': 'D#', 'GB': 'F#', 'AB': 'G#', 'BB': 'A#'}
 MAJOR_THIRD, MINOR_THIRD, FIFTH = 4, 3, 7
+# The octaves in which every one of the twelve root names yields both a root at
+# or above MIDI note 0 and a fifth at or below 127. Derived, not picked: at -2
+# all twelve roots fall under 0, and at 9 eleven of the twelve push their fifth
+# past 127. C9 alone would fit, and a rule that admits one root name out of
+# twelve is not a rule.
+OCTAVE_RANGE = (-1, 8)
 # How far the root must beat the second strongest pitch class before the bar
 # gets a chord rather than a sustained root.
 #
@@ -78,11 +84,40 @@ def root_midi(name, octave=3):
     return value
 
 
+def check_octave(octave):
+    """The octave as an int inside OCTAVE_RANGE, or an authored error.
+
+    One definition, because there used to be two. chord_pitches clamped the
+    octave into range while progression's sustained root branch passed it
+    straight to root_midi, so --octave 9 wrote a clip on a sheet where every bar
+    cleared MIN_MARGIN and raised on a sheet where one bar did not. The failure
+    was a property of the music rather than of the command, which is the worst
+    way for one to present.
+
+    It raises rather than clamping. A clamp answers --octave 9 with octave 8 and
+    calls that success, which is the same silent substitution this module
+    refuses everywhere else: a caller who names an octave outside the range has
+    made a mistake, and quietly moving their music an octave hides it.
+    """
+    low, high = OCTAVE_RANGE
+    try:
+        value = int(octave)
+    except (TypeError, ValueError):
+        raise MidiEmitError(f'{octave!r} is not an octave') from None
+    if not low <= value <= high:
+        raise MidiEmitError(
+            f'octave {value} is outside {low} to {high}. Below {low} the root '
+            f'falls under MIDI note 0, and above {high} the fifth above it '
+            f'passes 127 for eleven of the twelve root names. Choose an octave '
+            f'inside that range rather than one this tool would have to move.')
+    return value
+
+
 def chord_pitches(entry, octave=3):
     """Root position block chord. No inversions, no invented thirds."""
-    octave = max(-1, min(8, int(octave)))
+    octave = check_octave(octave)
     # No range fixup after this point, and none is reachable. root_midi raises
-    # unless 0 <= root <= 127, and the clamp above caps the octave at 8, so the
+    # unless 0 <= root <= 127, and check_octave caps the octave at 8, so the
     # reachable roots run C-1 = 0 to B8 = 119 and the highest fifth is 126.
     # Checked against all 120: neither a low nor a high correction ever fired.
     # An untested fallback is a claim nobody checks, so it is gone rather than
@@ -151,6 +186,9 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
     sequence = _require(sheet, 'chords')
     if not isinstance(bpm, (int, float)) or bpm <= 0:
         raise MidiEmitError(f'{bpm!r} is not a tempo')
+    # Before the loop, not inside it. Validating per bar would make an out of
+    # range octave raise only on sheets that happen to contain a low margin bar.
+    octave = check_octave(octave)
 
     mid = mido.MidiFile(type=0, ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
@@ -189,7 +227,7 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
     for index, entry in enumerate(sequence):
         margin = entry.get('root_margin')
         if margin is None or float(margin) < min_margin:
-            pitches = [root_midi(entry['root'], octave)]
+            pitches = [root_midi(entry['root'], octave)]  # octave checked above
         else:
             pitches = chord_pitches(entry, octave)
         if align:

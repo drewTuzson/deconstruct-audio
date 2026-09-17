@@ -55,10 +55,62 @@ class PitchTests(unittest.TestCase):
             m.root_midi('H', 3)
 
     def test_pitches_stay_inside_the_midi_range(self):
-        for octave in (-1, 0, 8, 9):
-            for p in m.chord_pitches(entry(), octave=octave):
-                self.assertGreaterEqual(p, 0)
-                self.assertLessEqual(p, 127)
+        low, high = m.OCTAVE_RANGE
+        for octave in range(low, high + 1):
+            for name in m.NOTES:
+                for p in m.chord_pitches(entry(root=name), octave=octave):
+                    self.assertGreaterEqual(p, 0)
+                    self.assertLessEqual(p, 127)
+
+    def test_an_octave_outside_the_range_is_an_error_not_a_silent_clamp(self):
+        """Both ends, both paths.
+
+        chord_pitches used to clamp and the sustained root path did not, so
+        --octave 9 depended on whether the sheet held a low margin bar. A clamp
+        would also answer 9 with 8 and call it success, which is the silent
+        substitution this module refuses everywhere else.
+        """
+        low, high = m.OCTAVE_RANGE
+        for octave in (low - 1, high + 1, 99, -99):
+            with self.subTest(octave=octave):
+                # The chord path.
+                with self.assertRaises(m.MidiEmitError):
+                    m.chord_pitches(entry(third_present=True), octave=octave)
+                # The sustained root path, reached by a margin below the cut.
+                with self.assertRaises(m.MidiEmitError):
+                    m.chord_pitches(entry(third_present=False), octave=octave)
+                with self.assertRaises(m.MidiEmitError):
+                    m.check_octave(octave)
+
+    def test_both_ends_of_the_octave_range_are_usable_on_both_paths(self):
+        low, high = m.OCTAVE_RANGE
+        for octave in (low, high):
+            with self.subTest(octave=octave):
+                chord = m.chord_pitches(entry(third_present=True), octave=octave)
+                self.assertEqual(len(chord), 3)
+                dyad = m.chord_pitches(entry(third_present=False), octave=octave)
+                self.assertEqual(len(dyad), 2)
+                for p in chord + dyad + [m.root_midi('A', octave)]:
+                    self.assertGreaterEqual(p, 0)
+                    self.assertLessEqual(p, 127)
+
+    def test_a_bad_octave_fails_the_same_way_whatever_the_music_says(self):
+        """The regression this is really about.
+
+        Two sheets differing only in one bar's root_margin. With the octave
+        validated per bar instead of once, the first wrote a clip and the second
+        raised, so the same command succeeded or failed depending on the music.
+        """
+        for margin in (1.50, 1.04):
+            with self.subTest(margin=margin):
+                sheet = json.loads(json.dumps(FIXTURE))
+                for e in sheet['facts']['chords']['value']:
+                    e['root_margin'] = 1.50
+                sheet['facts']['chords']['value'][3]['root_margin'] = margin
+                with self.assertRaises(m.MidiEmitError):
+                    m.progression(sheet, octave=m.OCTAVE_RANGE[1] + 1)
+                # And the same octave inside the range works on both sheets.
+                self.assertGreater(m.progression(sheet, octave=3).length, 1.0)
 
 
 import tempfile

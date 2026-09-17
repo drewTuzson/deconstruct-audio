@@ -39,7 +39,7 @@ Three commands measure instead of describing. None of them needs a key, a comple
 
 ## Harmony as MIDI: midi
 
-`midi <facts.json>` writes the measured chord progression of a fact sheet to a MIDI file and prints `MIDI_WRITTEN=<path>`. It exists because chord names written into a text prompt are discarded by the generator, so the clip is the channel that carries harmony when text cannot. `--out` names the file, which otherwise lands as `progression.mid` beside the fact sheet, and `--octave` moves the chord roots. It reads only the fact sheet: no audio, no network, no key.
+`midi <facts.json>` writes the measured chord progression of a fact sheet to a MIDI file and prints `MIDI_WRITTEN=<path>`. It exists because chord names written into a text prompt are discarded by the generator, so the clip is the channel that carries harmony when text cannot. `--out` names the file, which otherwise lands as `progression.mid` beside the fact sheet, and `--octave` moves the chord roots, from -1 to 8. Outside that range the root or the fifth above it leaves the MIDI range, and the command says so and stops rather than quietly using the nearest octave it can represent. It reads only the fact sheet: no audio, no network, no key.
 
 Never describe the output as a transcription. It is the harmonic skeleton and nothing else: one chord per bar, root position block chords, no melody, no inversions, no voicings. Say "the measured chord progression", not "the song as MIDI".
 
