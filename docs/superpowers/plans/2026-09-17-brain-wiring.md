@@ -160,6 +160,43 @@ class RuleExtractionTests(unittest.TestCase):
     def test_it_reads_the_exclude_budget_from_the_text(self):
         self.assertEqual(self.rules['exclude_budget'], (180, 200))
 
+    def test_a_mode_list_before_the_definitions_does_not_steal_a_budget(self):
+        # The shape that defeated the first anchored version: the modes are
+        # named on one line, so a fixed window from CUSTOM runs into SIMPLE's
+        # budget and returns cap 3000 with nothing in unreadable.
+        text = ('Ask the mode: SIMPLE, CUSTOM, STUDIO.\n'
+                '- STUDIO: one element.\n'
+                '- SIMPLE: Target 2,000 to 2,500 characters (box cap 3,000).\n'
+                '- CUSTOM (Advanced): style prompt HARD limit 1,000 '
+                'characters, target 850 to 950.')
+        rules = b.extract_rules(text)
+        self.assertEqual(rules['budgets']['custom']['cap'], 1000)
+        self.assertEqual(rules['budgets']['custom']['target'], (850, 950))
+
+    def test_a_longer_word_containing_a_mode_name_is_not_that_mode(self):
+        text = ('You may CUSTOMISE the output.\n'
+                '- SIMPLE: Target 2,000 to 2,500 characters (box cap 3,000).\n'
+                '- CUSTOM (Advanced): style prompt HARD limit 1,000 '
+                'characters, target 850 to 950.')
+        self.assertEqual(b.extract_rules(text)['budgets']['custom']['cap'], 1000)
+
+    def test_a_budget_wrapped_beyond_the_window_is_unreadable_not_wrong(self):
+        # The conservative half of the trade. An unreadable rule is reported
+        # and a human widens the pattern. A confidently wrong budget ships a
+        # prompt the Brain rejects after the generation is paid for.
+        text = ('- CUSTOM (Advanced):\n  style prompt\n  HARD\n'
+                '  limit 1,000 characters, target 850 to 950.')
+        rules = b.extract_rules(text)
+        self.assertIs(rules['budgets']['custom']['cap'], b.UNREADABLE)
+        self.assertIn('budgets.custom', rules['unreadable'])
+
+    def test_a_banned_list_that_parses_to_nothing_is_unreadable(self):
+        # An empty tuple reports as a rule read cleanly and then passes every
+        # string: a validator switched off behind a green light.
+        rules = b.extract_rules('Fatigue words banned in styles AND lyrics: .')
+        self.assertIs(rules['banned_words'], b.UNREADABLE)
+        self.assertIn('banned_words', rules['unreadable'])
+
     def test_a_rule_it_cannot_find_is_unreadable_not_empty(self):
         rules = b.extract_rules('a rules file with none of the expected labels')
         self.assertIs(rules['banned_words'], b.UNREADABLE)
@@ -223,21 +260,42 @@ def _int(token):
 
 
 MODE_WINDOW_LINES = 3
+MODE_TOKENS = ('SIMPLE', 'CUSTOM', 'STUDIO', 'EXCLUDE')
 
 
 def _near(text, token, pattern):
-    """Search for `pattern` only in the lines around `token`.
+    """Search for `pattern` only in the lines belonging to `token`.
 
-    Anchoring matters more than the pattern does. A `.*?` span under re.S will
-    happily cross half a document to find something that looks like a budget
-    and return it with no indication that it came from the wrong section.
+    Anchoring matters more than the pattern does, and two things have to be
+    true for the anchor to hold.
+
+    The token must be a WORD. A plain substring test matched `CUSTOMISE` and
+    read the next mode's budget as CUSTOM's, returning cap 3000 where the
+    answer is 1000, with nothing in `unreadable` to say so.
+
+    The window must STOP at the next mode. A Brain that lists its modes before
+    defining them puts `SIMPLE, CUSTOM, STUDIO` on one line, and a fixed three
+    line window from `CUSTOM` then runs straight into SIMPLE's budget. Same
+    wrong answer, same silence.
+
+    Failing to UNREADABLE when a budget wraps beyond the window is the correct
+    trade. An unreadable rule is reported and a human widens the pattern; a
+    confidently wrong budget ships a prompt the Brain rejects after the
+    generation is paid for.
     """
     lines = text.splitlines()
+    boundary = re.compile(r'\b(' + '|'.join(MODE_TOKENS) + r')\b')
+    word = re.compile(r'\b' + re.escape(token) + r'\b')
     for index, line in enumerate(lines):
-        if token not in line:
+        if not word.search(line):
             continue
-        window = '\n'.join(lines[index:index + MODE_WINDOW_LINES])
-        found = re.search(pattern, window)
+        window = [line]
+        for following in lines[index + 1:index + MODE_WINDOW_LINES]:
+            other = boundary.search(following)
+            if other and other.group(1) != token:
+                break
+            window.append(following)
+        found = re.search(pattern, '\n'.join(window))
         if found:
             return found
     return None
@@ -333,7 +391,7 @@ def extract_rules(text):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 12 tests
+Expected: PASS, 16 tests
 
 - [ ] **Step 5: Prove extraction against the real Brain**
 
@@ -416,6 +474,14 @@ def check(results, name):
 
 class ValidatorTests(unittest.TestCase):
     def run_it(self, style=GOOD_STYLE, exclude=GOOD_EXCLUDE, **kw):
+        # The default declaration set is the judgement in GOOD_STYLE: the
+        # genre pair, the moods and the vocal tags. Measured phrases are not
+        # declared, because they must come from the slots or fail.
+        kw.setdefault('declared', ('Rock', 'Post Hardcore', 'defiant', 'urgent',
+                                   'group shout vocals',
+                                   'one lead vocalist only',
+                                   'thick distorted bass', 'punchy kick drum'))
+        kw.setdefault('filled', b.slots(FULL_SHEET))
         return b.validate(style, exclude, SHEET, rules(), **kw)
 
     def test_a_clean_style_passes_every_check_it_can_run(self):
@@ -491,6 +557,65 @@ class ValidatorTests(unittest.TestCase):
         results = self.run_it(exclude='strings')
         self.assertEqual(check(results, 'exclude_budget')['verdict'], 'FAIL')
 
+    def test_an_invented_style_sharing_one_phrase_still_fails(self):
+        # The defect this contract replaces. The previous check asked whether
+        # ANY slot phrase appeared, so a style about a converted grain silo
+        # that happened to carry one tag passed all thirteen checks.
+        invented = ('81 BPM, converted grain silo reverb, hand cranked music '
+                    'box, letterpress clatter. The piece begins in a stairwell '
+                    'and never leaves it. It ends when the tape runs out.')
+        results = self.run_it(style=invented)
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_declared_judgement_passes_and_is_counted_separately(self):
+        results = self.run_it(
+            declared=('Rock', 'Post Hardcore', 'defiant', 'urgent',
+                      'group shout vocals', 'one lead vocalist only',
+                      'thick distorted bass', 'punchy kick drum'))
+        entry = check(results, 'provenance')
+        self.assertEqual(entry['verdict'], 'PASS')
+        self.assertIn('declared as judgement', entry['detail'])
+
+    def test_a_style_that_is_entirely_judgement_fails(self):
+        # Declaring everything is the other way to sever the prompt from the
+        # measurements, and it must not be a way through.
+        tags = 'Rock, Post Hardcore, defiant. It opens quietly. It ends loudly.'
+        results = self.run_it(style=tags,
+                              declared=('Rock', 'Post Hardcore', 'defiant',
+                                        'It opens quietly', 'It ends loudly'))
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_a_phrase_cannot_be_inverted_and_still_count_as_inherited(self):
+        # The prefix match let 'roughly 12 seconds of build' and 'roughly 12
+        # minutes of total silence' score as the same measurement.
+        inverted = GOOD_STYLE.replace(
+            'opens on a long instrumental build',
+            'opens on a long instrumental silence')
+        results = self.run_it(style=inverted)
+        self.assertEqual(check(results, 'provenance')['verdict'], 'FAIL')
+
+    def test_an_unacknowledged_ask_first_fails(self):
+        filled = b.slots(FULL_SHEET)
+        filled['ask_first'] = ['tempo is graded INFER: competing level at 4/3']
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'FAIL')
+
+    def test_an_acknowledged_ask_first_passes(self):
+        filled = b.slots(FULL_SHEET)
+        filled['ask_first'] = ['tempo is graded INFER: competing level at 4/3']
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled, acknowledged=True)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'PASS')
+
+    def test_a_held_out_axis_leaves_no_trace_in_the_slots(self):
+        held = b.slots(FULL_SHEET, hold_out='lead_register')
+        self.assertEqual(held['held_out'], 'lead_register')
+        joined = ' '.join(held['instruments']).lower()
+        self.assertNotIn('lead guitar figure', joined)
+        kept = b.slots(FULL_SHEET)
+        self.assertIn('lead guitar figure', ' '.join(kept['instruments']).lower())
+
     def test_an_unreadable_rule_reports_unknown_rather_than_pass(self):
         blind = b.extract_rules('a file with none of the labels')
         results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, blind)
@@ -559,15 +684,51 @@ def slot_numbers(filled):
     '7 sections' on a sheet whose section count is UNKNOWN.
     """
     out = set()
-    for key in ('moods', 'instruments', 'vocals', 'production', 'direction'):
+    for key in SLOT_KEYS:
         for phrase in filled.get(key, []):
             for token in re.findall(r'\d+', str(phrase)):
                 out.add(int(token))
     return out
 
 
+# A boundary worth naming rather than discovering later. Tracing against the
+# slots moves the trust boundary one step: a number the SLOT BUILDER invented
+# now traces to itself. The fallback direction sentence is the live instance.
+# It says "its longest unbroken stretch runs about 38 seconds", 38 is a
+# difference between two measured boundaries rather than a measured value, and
+# it appears nowhere in facts.json yet traces cleanly.
+#
+# That is acceptable and it is not nothing. The slot builder is code in this
+# repository with tests, which is a different class of thing from a sentence an
+# agent wrote. The check answers "did this come from the fact sheet, through
+# code we own", not "is this number in facts.json". Anyone adding a slot phrase
+# that computes a number is extending what the prompt may say, and should say
+# so in the pull request.
+
+
+SLOT_KEYS = ('moods', 'instruments', 'vocals', 'production', 'direction')
+
+
+def _canonical(text):
+    """One spelling for comparison. Not a prefix: a prefix match let a phrase
+    be counted as inherited and then inverted, so 'roughly 12 seconds of build'
+    and 'roughly 12 minutes of total silence' both scored as coming from the
+    same measurement."""
+    return ' '.join(str(text).lower().replace('.', ' ').split())
+
+
+def _decompose(style):
+    """The style as the Brain's own format defines it: a comma separated tag
+    stack, then direction prose in sentences."""
+    parts = [p for p in SENTENCE.split(style)]
+    head = parts[0] if parts else ''
+    tags = [t.strip() for t in head.split(',') if t.strip()]
+    sentences = [s.strip() for s in parts[1:] if s.strip()]
+    return tags, sentences
+
+
 def validate(style, exclude, sheet, rules, mode='custom', names=(),
-             filled=None, acknowledged=False):
+             filled=None, acknowledged=False, declared=()):
     """Check a composed prompt against the Brain's own rules.
 
     `filled` is the slots dict the prompt was supposed to be written from. It
@@ -662,25 +823,49 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
         f'orphans {orphans}' if orphans
         else f'{len(quoted)} numbers, all traced to a slot'))
 
-    # Provenance. This is what makes "written from the fact sheet alone" a
-    # checkable claim rather than an assertion, and it is why the exit bar was
-    # redesigned: a style written from listening.md prose passed every other
-    # validator identically.
-    used, unused = [], []
-    for key in ('moods', 'instruments', 'vocals', 'production', 'direction'):
-        for phrase in filled.get(key, []):
-            core = phrase.rstrip('.').strip().lower()
-            (used if core[:28] in body else unused).append(phrase)
-    if not used:
+    # Provenance, as a contract rather than a coincidence counter.
+    #
+    # The first version asked whether ANY slot phrase appeared in the style. A
+    # style about a converted grain silo, sharing a single token with the
+    # sheet, passed all thirteen checks including 'provenance 1 of 7 present'.
+    # Worse, it was not independent: bpm_placement mandates the exact phrase
+    # that satisfied it, so provenance certified what two other checks had
+    # already required and added nothing.
+    #
+    # The rule now runs the other way. Every piece of the style must be
+    # accounted for: it either matches a slot phrase, which means it came from
+    # a measurement, or the agent declared it as its own judgement. Anything
+    # else is undeclared content and the prompt fails.
+    #
+    # That makes the composer enumerate its judgement calls, which is the
+    # point. A genre, a subgenre and an era are judgement and belong in
+    # `declared`. A register, a tuning and a BPM are measurements and belong in
+    # the slots. A prompt is then exactly slots plus declared additions, and
+    # "written from the fact sheet alone" becomes a thing a reader can check.
+    slot_phrases = {_canonical(p) for key in SLOT_KEYS
+                    for p in filled.get(key, [])}
+    spoken = {_canonical(d) for d in declared}
+    tags, sentences = _decompose(style)
+    pieces = [(t, _canonical(t)) for t in tags] + \
+             [(s, _canonical(s)) for s in sentences]
+    undeclared = [raw for raw, key in pieces
+                  if key not in slot_phrases and key not in spoken]
+    used = sorted({key for _, key in pieces if key in slot_phrases})
+    if undeclared:
         results.append(_result(
             'provenance', 'FAIL',
-            'not one slot phrase appears in the style, so nothing connects '
-            'this prompt to the measurements'))
+            f'{len(undeclared)} of {len(pieces)} pieces trace to neither a '
+            f'measurement nor a declared judgement: {undeclared}'))
+    elif not used:
+        results.append(_result(
+            'provenance', 'FAIL',
+            'every piece was declared as judgement and not one came from a '
+            'measurement, so nothing connects this prompt to the fact sheet'))
     else:
         results.append(_result(
             'provenance', 'PASS',
-            f'{len(used)} of {len(used) + len(unused)} slot phrases present; '
-            f'unused: {unused}'))
+            f'{len(used)} pieces from measurements, '
+            f'{len(pieces) - len(used)} declared as judgement'))
 
     # An INFER tempo that nobody acknowledged must not reach a generation.
     pending = filled.get('ask_first') or []
@@ -719,7 +904,7 @@ def validate(style, exclude, sheet, rules, mode='custom', names=(),
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 29 tests
+Expected: PASS, 40 tests
 
 If `test_a_clean_style_passes_every_check_it_can_run` fails, read which check
 failed and fix the validator, not the fixture, unless the fixture genuinely
@@ -1043,7 +1228,7 @@ missing.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python -m unittest tests.test_brain -v`
-Expected: PASS, 39 tests
+Expected: PASS, 51 tests
 
 - [ ] **Step 5: Commit**
 
@@ -1133,7 +1318,8 @@ def cmd_prompt(args):
     exclude = args.exclude.read_text(encoding='utf-8').strip() if args.exclude else ''
     results = brain_mod.validate(style, exclude, sheet, rules,
                                  mode=args.mode, names=tuple(args.name),
-                                 filled=filled, acknowledged=args.acknowledge)
+                                 filled=filled, acknowledged=args.acknowledge,
+                                 declared=tuple(args.added))
     for entry in results:
         print(f'{entry["verdict"]:<8}{entry["check"]:<18}{entry["detail"]}')
     verdicts = [e['verdict'] for e in results]
@@ -1170,6 +1356,12 @@ With the other parsers in `main()`:
                          'it anyway. The control for the exit bar.')
     pp.add_argument('--acknowledge', action='store_true',
                     help='The user has answered every ASK_FIRST question.')
+    pp.add_argument('--added', action='append', default=[],
+                    help='A tag or sentence in the style that is the agent\'s '
+                         'own judgement rather than a measurement, for example '
+                         'a genre or an era. Repeatable. Anything in the style '
+                         'that is neither a slot phrase nor declared here '
+                         'fails provenance.')
     pp.add_argument('--out', type=Path, default=None)
 ```
 
@@ -1303,11 +1495,18 @@ Read the result as a pair, not as one verdict:
 
 | Carried axes | Held out axis | What it means |
 |---|---|---|
-| match | misses | The fact sheet carried the result. This is the outcome the project claims |
-| match | also matches | Something other than the prompt is driving it. The bar has told you the test is weak, which is worth more than a PASS |
-| miss | anything | The prompt did not steer the generation, and nothing downstream is validated |
+| match | misses | The fact sheet carried the result. The outcome the project claims |
+| match | also matches | Something other than the prompt is driving it: the genre's own prior landed an axis nothing anchored. The bar telling you the test is weak is worth more than a PASS |
+| miss | misses | The prompt did not steer the generation. Nothing downstream is validated |
+| miss | matches | The prompt steered the generation AWAY from the reference while the unanchored axis landed on its own. The worst result, and the only one that says a carried axis is actively harmful |
+| any | UNKNOWN | Unreadable. `_register` returns UNKNOWN below sixteen voiced frames, which is exactly what a thin generated guitar produces, so the control can fail to report at all. Hold out a different axis and generate again, or accept that this run measured nothing about provenance |
 
 The exit bar is met by the first row only.
+
+The last row is not hypothetical and it is why the held out axis is a flag
+rather than a constant: `lead_register` is the default because it is the axis
+most likely to drift, and that is the same property that makes it most likely
+to come back UNKNOWN on a sparse generation.
 
 **What this still cannot do.** It cannot prove the agent never read
 `listening.md`. It can only show that everything measurable in the style traces
