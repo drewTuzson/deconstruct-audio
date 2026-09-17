@@ -25,21 +25,29 @@ messages, the PR title and body, and edits to these docs.
 
 ## Commands and checks
 
-Setup, once per worktree. Worktrees do not share `.venv/`, so a fresh one
-needs its own:
+Setup. The main checkout owns the only `.venv/`:
 
 ```bash
 python3 scripts/setup.py          # builds .venv, installs requirements.txt
 ```
 
-The full suite, which is the gate for every PR:
+A worktree does not build its own. `torch` alone is about 2.5 GB, and four
+worktrees each holding a copy of it is not a test strategy. Run a worktree's
+tests with the main checkout's interpreter by absolute path:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests
+/Users/drewtuzson/Documents/Projects/deconstruct-audio/.venv/bin/python \
+  -m unittest discover -s tests
 ```
 
-Expect `Ran 27 tests ... OK` on `652d1cf`. The summary goes to stderr, so
-redirect if you are capturing it.
+The interpreter supplies the libraries; `discover -s tests` and the
+`Path(__file__).parents[1]` in each test resolve against your worktree, so you
+are testing your own code. A worktree that needs a dependency the main venv
+lacks installs it into that venv, which every worktree then sees.
+
+The full suite is the gate for every PR. Expect `Ran 97 tests ... OK
+(skipped=1)` on `f021646`. The summary goes to stderr, so redirect if you are
+capturing it.
 
 Environment self-check, which prints dependency and config status as JSON:
 
@@ -105,6 +113,8 @@ Break one of these and the PR does not ship, whatever else it fixes.
   in your worktree reads your real key and Brain. Point
   `DECONSTRUCT_AUDIO_CONFIG_DIR` somewhere disposable before you experiment
   with `set-key`, `connect-brain` or the style commands.
+- `.venv/` is shared too, by the rule above. Installing a dependency from one
+  worktree changes what every other worktree sees, so say so in your PR.
 - Every Gemini call spends real quota against that key.
 
 ## What cannot be tested locally
