@@ -154,29 +154,60 @@ def _require(sheet, axis):
     return entry['value']
 
 
-def _window_value(entry, index, field):
-    """One edge of a chord window, as a finite number or an authored error.
+def _finite(raw, index, field, what):
+    """A finite float from a fact sheet, or an authored error naming its bar.
 
-    Without this, a sheet carrying end_s as a string reaches float() and the
-    ValueError lands in the top level handler, which prints "Details suppressed
-    to protect secrets" for what is a data problem in a file the user supplied.
-    That is the same failure read_facts already fixed one layer up, one field
-    deeper. A NaN is worse than a string: it survives arithmetic, compares false
-    against every bound, and would write a garbage delta time instead of raising.
+    read_facts validates that the sheet is JSON and an object. It does not walk
+    into the chord entries, so every number this module reads out of one is
+    still unchecked at this point. Without this, a sheet carrying end_s as a
+    string reaches float() and the ValueError lands in the top level handler,
+    which prints "Details suppressed to protect secrets" for what is a data
+    problem in a file the user supplied.
+
+    NaN is the worse input and the reason this checks finiteness rather than
+    just type. It survives arithmetic and compares false against every bound, so
+    it slips past the zero width, backwards and low margin tests alike: a NaN
+    root_margin took the chord path, which is the opposite of what an unusable
+    measurement should do.
     """
-    raw = entry.get(field)
     try:
         value = float(raw)
     except (TypeError, ValueError):
         raise MidiEmitError(
-            f'bar {index} has {field}={raw!r}, which is not a number. Chord '
-            f'window edges must be seconds, and the emitter will not guess one '
-            f'it was not given.') from None
+            f'bar {index} has {field}={raw!r}, which is not a number. {what}') from None
     if not math.isfinite(value):
         raise MidiEmitError(
-            f'bar {index} has {field}={raw!r}, which is not a finite number of '
-            f'seconds. The chord sequence in this fact sheet is not well formed.')
+            f'bar {index} has {field}={raw!r}, which is not a finite number. {what}')
     return value
+
+
+def _window_value(entry, index, field):
+    """One edge of a chord window, in seconds."""
+    return _finite(entry.get(field), index, field,
+                   'Chord window edges must be seconds, and the emitter will '
+                   'not guess one it was not given.')
+
+
+def is_low_confidence(entry, index, min_margin=MIN_MARGIN):
+    """Whether this bar gets a sustained root rather than a chord.
+
+    One definition, used by progression and by low_confidence_bars. They used to
+    decide this separately, which is the same shape of defect as the two octave
+    paths: the command prints SUSTAINED_ROOT_BARS from one and writes the clip
+    from the other, so any drift between them would mean the printed bars did
+    not describe the file on disk.
+
+    A missing margin is no confidence and gets the sustained root, because that
+    is what the schema's absence means. A margin that is present but not a
+    finite number is not an absence, it is a corrupt sheet, and raises.
+    """
+    raw = entry.get('root_margin')
+    if raw is None:
+        return True
+    return _finite(raw, index, 'root_margin',
+                   'A root margin is how far the winning pitch class beat the '
+                   'runner up, so it has to be a number the emitter can '
+                   'compare against the threshold.') < min_margin
 
 
 def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
@@ -225,8 +256,7 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
     # drift on a single partial bar, which the window data contradicts.
     cursor = 0
     for index, entry in enumerate(sequence):
-        margin = entry.get('root_margin')
-        if margin is None or float(margin) < min_margin:
+        if is_low_confidence(entry, index, min_margin):
             pitches = [root_midi(entry['root'], octave)]  # octave checked above
         else:
             pitches = chord_pitches(entry, octave)
@@ -281,9 +311,5 @@ def progression(sheet, octave=3, min_margin=MIN_MARGIN, ticks_per_beat=480,
 def low_confidence_bars(sheet, min_margin=MIN_MARGIN):
     """Bar indices that carry a sustained root, so the fact sheet can name them."""
     sequence = sheet.get('facts', {}).get('chords', {}).get('value') or []
-    out = []
-    for i, e in enumerate(sequence):
-        margin = e.get('root_margin')
-        if margin is None or float(margin) < min_margin:
-            out.append(i)
-    return out
+    return [i for i, e in enumerate(sequence)
+            if is_low_confidence(e, i, min_margin)]

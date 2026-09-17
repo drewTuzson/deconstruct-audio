@@ -241,6 +241,57 @@ class FileTests(unittest.TestCase):
         self.assertNotIn('bar -1', str(caught.exception))
         self.assertIn('bar 0', str(caught.exception))
 
+    def test_a_root_margin_that_is_not_a_number_is_an_authored_error(self):
+        for bad in ('high', [1.2], {}, 'NaN-ish'):
+            with self.subTest(bad=bad):
+                sheet = json.loads(json.dumps(FIXTURE))
+                sheet['facts']['chords']['value'][1]['root_margin'] = bad
+                with self.assertRaises(m.MidiEmitError) as caught:
+                    m.progression(sheet)
+                self.assertIn('bar 1', str(caught.exception))
+                self.assertIn('root_margin', str(caught.exception))
+                # low_confidence_bars reads the same field and must agree.
+                with self.assertRaises(m.MidiEmitError):
+                    m.low_confidence_bars(sheet)
+
+    def test_a_non_finite_root_margin_does_not_take_the_chord_path(self):
+        """NaN compares false against every bound, so `margin < min_margin` was
+        false and the bar got a full chord. An unusable measurement must not
+        produce more notes than a usable one."""
+        for bad in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(bad=bad):
+                sheet = json.loads(json.dumps(FIXTURE))
+                sheet['facts']['chords']['value'][3]['root_margin'] = bad
+                with self.assertRaises(m.MidiEmitError):
+                    m.progression(sheet)
+
+    def test_a_missing_root_margin_is_still_a_sustained_root(self):
+        # Absent means no confidence, which is different from corrupt.
+        sheet = json.loads(json.dumps(FIXTURE))
+        sheet['facts']['chords']['value'][1]['root_margin'] = None
+        self.assertIn(1, m.low_confidence_bars(sheet))
+        self.assertEqual(len(m.progression(sheet).tracks[0][2].bytes()), 3)
+
+    def test_the_printed_bars_describe_the_clip_that_was_written(self):
+        """SUSTAINED_ROOT_BARS comes from low_confidence_bars and the notes come
+        from progression. They used to decide low confidence separately, so this
+        pins them to the same answer across the whole margin range."""
+        for cut in (1.0, 1.05, 1.2, 1.4, 1.6):
+            with self.subTest(min_margin=cut):
+                named = set(m.low_confidence_bars(FIXTURE, cut))
+                mid = m.progression(FIXTURE, min_margin=cut)
+                bar_ticks = 4 * mid.ticks_per_beat
+                lead = int(round(3.0 * mid.ticks_per_beat * 80.0 / 60.0))
+                written, absolute = set(), 0
+                counts = {}
+                for msg in mid.tracks[0]:
+                    absolute += msg.time
+                    if msg.type == 'note_on' and msg.velocity > 0:
+                        bar = (absolute - lead) // bar_ticks
+                        counts[bar] = counts.get(bar, 0) + 1
+                written = {b for b, n in counts.items() if n == 1}
+                self.assertEqual(named, written)
+
     def test_every_note_on_has_a_matching_note_off(self):
         open_notes = {}
         for msg in self.mid.tracks[0]:
