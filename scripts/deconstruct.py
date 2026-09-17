@@ -680,6 +680,50 @@ def cmd_midi(args):
         print(f'SUSTAINED_ROOT_BARS={",".join(str(b) for b in sustained)}')
         print(midi_emit.LOW_CONFIDENCE_NOTE, file=sys.stderr)
 
+def cmd_research(args):
+    # research is imported here, not at module level, for the reason the
+    # comment at the top of this file gives. research.py is standard library
+    # only today, so this costs nothing, but the rule is about the file the
+    # import would land in, not about this module's weight.
+    import research as research_mod
+    # read_facts, not json.loads. A mistyped path through a bare json.loads
+    # reaches the user as 'ERROR: FileNotFoundError ... Details suppressed to
+    # protect secrets', which is the failure read_facts exists to stop. The
+    # MIDI command shipped with the same defect and fixed it.
+    sheet = read_facts(args.facts, 'input')
+    raw = []
+    if args.claims:
+        raw = json.loads(args.claims.read_text(encoding='utf-8'))
+        if not isinstance(raw, list):
+            raise SkillError('--claims must hold a JSON array of claim objects')
+    try:
+        claims = [research_mod.claim(
+            c['axis'], c['value'], c['source'], c['confidence'], c.get('note'))
+            for c in raw]
+        rec = research_mod.record(args.artist, args.title, claims)
+    except research_mod.ResearchError as exc:
+        # Wrapped in SkillError so the authored text reaches the user. The
+        # top-level handler prints only SkillError verbatim; anything else
+        # becomes 'Details suppressed to protect secrets', which would throw
+        # away the one sentence this module exists to say.
+        raise SkillError(str(exc)) from None
+    except KeyError as exc:
+        raise SkillError(f'a claim in {args.claims} is missing {exc}') from None
+    out = args.out or args.facts.parent
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'research.json').write_text(
+        json.dumps(rec, indent=2, allow_nan=False), encoding='utf-8')
+    (out / 'research.md').write_text(
+        research_mod.render_markdown(sheet, rec), encoding='utf-8')
+    rows = research_mod.collisions(sheet, rec)
+    print(f'RESEARCH_WRITTEN={out / "research.md"}')
+    print(f'COLLISIONS={len(rows)}')
+    for row in rows:
+        if not row['agrees']:
+            print(f'DISAGREEMENT axis={row["axis"]} '
+                  f'measured={row["measured"]} researched={row["researched"]} '
+                  f'authoritative=measured')
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
@@ -743,6 +787,13 @@ def main():
                     help='Output file. Defaults to progression.mid beside the fact sheet.')
     mi.add_argument('--octave', type=int, default=3,
                     help='Octave of the chord roots, -1 to 8. Outside that range the root or its fifth leaves the MIDI range, and the command says so rather than moving your music quietly.')
+    rp = sub.add_parser('research')
+    rp.add_argument('facts', type=Path)
+    rp.add_argument('--artist', default='')
+    rp.add_argument('--title', default='')
+    rp.add_argument('--claims', type=Path, default=None,
+                    help='JSON array of claim objects gathered by the agent.')
+    rp.add_argument('--out', type=Path, default=None)
     args = p.parse_args()
     if args.command == 'doctor':
         doctor()
@@ -809,6 +860,8 @@ def main():
         cmd_delete_style(args)
     elif args.command == 'midi':
         cmd_midi(args)
+    elif args.command == 'research':
+        cmd_research(args)
 
 if __name__ == '__main__':
     for stream in (sys.stdout, sys.stderr):
