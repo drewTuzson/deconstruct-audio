@@ -693,8 +693,31 @@ def cmd_research(args):
     sheet = read_facts(args.facts, 'input')
     raw = []
     if args.claims:
-        raw = json.loads(args.claims.read_text(encoding='utf-8'))
-        if not isinstance(raw, list):
+        # The claims file gets the same authored failures read_facts gives the
+        # fact sheet. Left to the top-level handler, a mistyped path, a stray
+        # comma or a NaN all print 'Details suppressed to protect secrets',
+        # which says nothing about a file the user just wrote and holds no
+        # secret to protect.
+        try:
+            claims_text = args.claims.read_text(encoding='utf-8')
+        except (OSError, UnicodeError):
+            raise SkillError('Cannot read the claims file: ' + str(args.claims)
+                             + '. Supply a readable JSON array of claim '
+                             'objects.') from None
+
+        def reject_constant(name):
+            # json.loads accepts NaN and Infinity, which are not JSON and which
+            # write_json then refuses on the way back out. Refusing at the door
+            # names the file the user can fix.
+            raise SkillError('The claims file holds ' + name + ', which is not '
+                             'valid JSON: ' + str(args.claims) + '.')
+
+        try:
+            raw = json.loads(claims_text, parse_constant=reject_constant)
+        except json.JSONDecodeError:
+            raise SkillError('The claims file is not valid JSON: '
+                             + str(args.claims) + '.') from None
+        if not isinstance(raw, list) or not all(isinstance(c, dict) for c in raw):
             raise SkillError('--claims must hold a JSON array of claim objects')
     try:
         claims = [research_mod.claim(
@@ -711,8 +734,11 @@ def cmd_research(args):
         raise SkillError(f'a claim in {args.claims} is missing {exc}') from None
     out = args.out or args.facts.parent
     out.mkdir(parents=True, exist_ok=True)
-    (out / 'research.json').write_text(
-        json.dumps(rec, indent=2, allow_nan=False), encoding='utf-8')
+    # write_json, not an inline dumps. The helper already owns the atomic
+    # mkstemp then os.replace pattern and the allow_nan=False rule, and a
+    # command growing its own writer when a helper owns one is the split
+    # AGENTS.md names. The helper landed after this plan was written.
+    write_json(out / 'research.json', rec)
     (out / 'research.md').write_text(
         research_mod.render_markdown(sheet, rec), encoding='utf-8')
     rows = research_mod.collisions(sheet, rec)

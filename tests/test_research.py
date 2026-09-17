@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -154,6 +155,80 @@ class CollisionTests(unittest.TestCase):
         self.assertIn('144', text)
         self.assertIn('measured', text.lower())
         self.assertIn('https://example.org/g', text)
+
+
+class NestedUnknownTests(unittest.TestCase):
+    """A nested axis under an UNKNOWN parent is still an axis that was measured.
+
+    The parent exists in the sheet, so the axis was attempted and did not
+    resolve, which is the same state a top-level UNKNOWN reports. Filing that
+    claim as context would print it under the heading that says such claims are
+    safe to use, which is the inversion the alias table exists to stop.
+    """
+
+    def _rec(self, *claims):
+        return r.record('An Artist', 'A Song', list(claims))
+
+    def test_a_nested_claim_under_an_unknown_parent_still_collides(self):
+        sheet = {'facts': {'loudness': {'value': None, 'confidence': 'UNKNOWN'}}}
+        rec = self._rec(r.claim('lra_lu', 9.0, 'https://example.org/h', 'GUESS'))
+        row = next(x for x in r.collisions(sheet, rec) if x['axis'] == 'lra_lu')
+        self.assertEqual(row['fact_axis'], 'loudness')
+        self.assertIsNone(row['measured'])
+        self.assertFalse(row['agrees'])
+        self.assertEqual(row['authoritative'], 'measured')
+        self.assertNotIn('## Context', r.render_markdown(sheet, rec))
+
+    def test_a_nested_field_absent_from_a_measured_parent_still_collides(self):
+        sheet = {'facts': {'loudness': {'value': {'integrated_lufs': -7.0},
+                                        'confidence': 'KNOW'}}}
+        rec = self._rec(r.claim('lra_lu', 9.0, 'https://example.org/i', 'GUESS'))
+        row = next(x for x in r.collisions(sheet, rec) if x['axis'] == 'lra_lu')
+        self.assertIsNone(row['measured'])
+        self.assertFalse(row['agrees'])
+
+    def test_an_axis_the_sheet_never_names_is_still_context(self):
+        sheet = {'facts': {'tempo': {'value': 80.7, 'confidence': 'KNOW'}}}
+        rec = self._rec(r.claim('scene', 'midwest emo revival',
+                                'https://example.org/j', 'INFER'))
+        self.assertEqual(r.collisions(sheet, rec), [])
+        self.assertIn('## Context', r.render_markdown(sheet, rec))
+
+
+class TableSafetyTests(unittest.TestCase):
+    """A claim is hand written text and a table is delimited by pipes.
+
+    A pipe opens a column and a newline opens a row. Either one separates a
+    measured value from its label, in the one table whose whole job is to show
+    which of the two is authoritative.
+    """
+
+    DELIMITER = re.compile(r'(?<!\\)\|')
+
+    def _rec(self, *claims):
+        return r.record('An Artist', 'A Song', list(claims))
+
+    def test_a_pipe_or_a_newline_in_a_context_claim_keeps_four_columns(self):
+        rec = self._rec(r.claim('scene', 'emo | revival\nand a second line',
+                                'https://example.org/k?a=1|2', 'INFER'))
+        rows = [ln for ln in r.render_markdown(SHEET, rec).splitlines()
+                if 'revival' in ln]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(self.DELIMITER.findall(rows[0])), 5)
+
+    def test_a_pipe_in_a_collision_claim_keeps_nine_columns(self):
+        rec = self._rec(r.claim('tempo', '144 | or 72\nmaybe',
+                                'https://example.org/l?a=1|2', 'GUESS'))
+        rows = [ln for ln in r.render_markdown(SHEET, rec).splitlines()
+                if 'or 72' in ln]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(self.DELIMITER.findall(rows[0])), 10)
+
+    def test_the_escaping_does_not_lose_the_text(self):
+        rec = self._rec(r.claim('scene', 'emo | revival',
+                                'https://example.org/m', 'INFER'))
+        text = r.render_markdown(SHEET, rec)
+        self.assertIn(r'emo \| revival', text)
 
 
 if __name__ == '__main__':

@@ -136,9 +136,16 @@ def resolve_axis(sheet, axis):
         return None
     value = entry.get('value')
     if field is not None:
-        if not isinstance(value, dict) or field not in value:
-            return None
-        value = value[field]
+        # The parent axis is present, so this axis was attempted. An UNKNOWN
+        # parent carries value None rather than a dict, and a resolved one
+        # carries the dict. Returning None here for the UNKNOWN case would file
+        # the claim as context, printed under the heading that says such claims
+        # are safe to use, which is the same inversion the alias table exists to
+        # stop. A present parent that cannot yield the field therefore resolves
+        # to a measured None: the claim lands in the collision table and the
+        # measurement stays authoritative. Only an axis the sheet never names
+        # is context.
+        value = value.get(field) if isinstance(value, dict) else None
     return fact_axis, value, entry.get('confidence')
 
 
@@ -173,6 +180,20 @@ def collisions(sheet, rec):
     return rows
 
 
+def _cell(value):
+    """One markdown table cell, safe to sit between two pipes.
+
+    Claim axes, values and sources are free form text out of a hand written
+    file. A pipe opens a column and a newline opens a row, either of which
+    separates a measured value from its label in the one table whose whole job
+    is to show which of the two is authoritative. Runs of whitespace collapse
+    to a single space so a multi line claim stays on its own row, and pipes and
+    backslashes are escaped so the text still reads as it was written.
+    """
+    text = ' '.join(str(value).split())
+    return text.replace('\\', '\\\\').replace('|', '\\|')
+
+
 def render_markdown(sheet, rec):
     query = rec['query']
     name = ' - '.join(x for x in (query['artist'], query['title']) if x)
@@ -188,11 +209,12 @@ def render_markdown(sheet, rec):
                   '|---|---|---|---|---|---|---|---|---|']
         for row in rows:
             lines.append(
-                f'| {row["axis"]} | {row["fact_axis"]} | {row["measured"]} | '
-                f'{row["measured_confidence"]} | {row["researched"]} | '
-                f'{row["researched_confidence"]} | '
-                f'{"yes" if row["agrees"] else "no"} | {row["authoritative"]} | '
-                f'{row["source"]} |')
+                f'| {_cell(row["axis"])} | {_cell(row["fact_axis"])} | '
+                f'{_cell(row["measured"])} | {_cell(row["measured_confidence"])} | '
+                f'{_cell(row["researched"])} | '
+                f'{_cell(row["researched_confidence"])} | '
+                f'{"yes" if row["agrees"] else "no"} | '
+                f'{_cell(row["authoritative"])} | {_cell(row["source"])} |')
         lines.append('')
     context = [c for c in rec['claims'] if resolve_axis(sheet, c['axis']) is None]
     if context:
@@ -202,7 +224,7 @@ def render_markdown(sheet, rec):
                   'Never usable as a number.', '',
                   '| Axis | Claim | Grade | Source |', '|---|---|---|---|']
         for entry in context:
-            lines.append(f'| {entry["axis"]} | {entry["value"]} | '
-                         f'{entry["confidence"]} | {entry["source"]} |')
+            lines.append(f'| {_cell(entry["axis"])} | {_cell(entry["value"])} | '
+                         f'{_cell(entry["confidence"])} | {_cell(entry["source"])} |')
         lines.append('')
     return '\n'.join(lines) + '\n'
