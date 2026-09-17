@@ -814,7 +814,8 @@ def cmd_prompt(args):
         # Inside the wrap too: slots refuses an unrecognised hold out axis, and
         # an unwrapped BrainError reaches the user as 'Details suppressed to
         # protect secrets' instead of the sentence naming the valid axes.
-        filled = brain_mod.slots(sheet, hold_out=hold_out)
+        filled = brain_mod.slots(sheet, hold_out=hold_out,
+                                 tempo_level=args.tempo_level)
     except brain_mod.BrainError as exc:
         # Wrapped, or the top-level handler suppresses the authored message.
         raise SkillError(str(exc)) from None
@@ -832,6 +833,12 @@ def cmd_prompt(args):
     # a matching generation into evidence rather than a coincidence, so its
     # absence has to be as loud as its presence.
     print(f'HELD_OUT={filled.get("held_out") or "none"}')
+    # The selected level goes in the output a reviewer reads before approving a
+    # spend, not only into slots.json. A human answered a question here and the
+    # answer changed which BPM the prompt may state.
+    chosen = filled.get('tempo_selection')
+    if chosen:
+        print(f'TEMPO_LEVEL={chosen["bpm"]} SOURCE={chosen["source"]}')
     for rule in rules['unreadable']:
         print(f'RULE_UNREADABLE={rule}', file=sys.stderr)
     if filled['unusable']:
@@ -965,6 +972,13 @@ def build_parser():
                          'it anyway. The control for the exit bar. Defaults to '
                          'lead_register; pass none to run without a control, '
                          'which is a weaker result at the same price.')
+    pp.add_argument('--tempo-level', type=float, default=None,
+                    help='Answer the tempo ASK_FIRST by choosing a metrical '
+                         'level, in BPM. Only a value the measurement itself '
+                         'reported may be chosen: the primary, or a member of '
+                         'its family. Anything else is refused and the message '
+                         'names every selectable value. Choosing a level '
+                         'answers the tempo question on its own.')
     pp.add_argument('--acknowledge', action='store_true',
                     help='The user has answered every ASK_FIRST question.')
     pp.add_argument('--added', action='append', default=[],

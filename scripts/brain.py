@@ -347,7 +347,103 @@ HOLD_OUT_CHOICES = ('tempo', 'tuning', 'intro_seconds', 'lead_register',
                     'spectral_balance')
 
 
-def slots(sheet, hold_out=None):
+# A selected tempo has to match a measured one to within this many BPM.
+#
+# Chosen from two measured quantities, not from a round number.
+#
+# The floor: a fact sheet prints a tempo to one decimal and a prompt states it
+# as a whole number, so `162 BPM` in the style has to resolve back to the
+# 161.5 the tempogram reported, or the flag cannot be reused on a rerun of the
+# command that produced it. That rounding is worth at most 0.5 BPM.
+#
+# The ceiling: the levels on the reference sheet are 64.6, 80.7, 107.7, 129.2
+# and 161.5, so the gaps between neighbouring measured values are 16.1, 27.0,
+# 21.5 and 32.3 BPM. The smallest is 16.1, which a window of plus or minus 0.5
+# clears by a factor of sixteen, so no measured level can ever capture a value
+# meant for its neighbour.
+#
+# 0.5 therefore admits every spelling of a measured value and nothing else:
+# 161, 161.5 and 162 all resolve to the 2x member, and 160 resolves to nothing.
+TEMPO_MATCH_BPM = 0.5
+
+# The shape tempo.py writes a competing level in. Ratio labels are '2x' style
+# or '4/3' style; see RATIOS there.
+_TEMPO_LEVEL = re.compile(
+    r'([\d.]+x|\d+/\d+)\s+at\s+([\d.]+)\s+BPM'
+    r'(?:\s*\(tempogram relative strength\s+([\d.]+)\))?')
+
+
+def tempo_levels(entry):
+    """Every BPM this tempo fact reported, with how the measurement labelled it.
+
+    The selectable set, and the reason the flag can be trusted: a level is
+    offered only because the measurement put it in this fact, never because a
+    ratio of the primary would be plausible.
+
+    It is recovered from the fact's `note`, which is where the family ends up.
+    `tempo.grade` builds a structured family with a bpm, a ratio and a relative
+    strength for each member, and `facts._tempo_fact` keeps only the primary
+    and the prose, so the note is the only form of the family that reaches a
+    fact sheet. Parsing our own generated sentence is the narrow reading of
+    what the sheet actually contains; carrying the structured family through
+    `fact()` instead would be better and is a change to facts.py rather than
+    to this module.
+
+    One branch of that prose names its ratios without their BPMs. Those levels
+    are then not offered, which refuses a value the measurement did report.
+    That is the safe direction, and `select_tempo_level` says so rather than
+    implying the family was empty.
+    """
+    if not isinstance(entry, dict):
+        return []
+    primary = _number(entry.get('value'))
+    levels = [] if primary is None else [
+        {'bpm': primary, 'source': 'primary', 'relative_strength': None}]
+    seen = {primary}
+    for ratio, bpm, strength in _TEMPO_LEVEL.findall(_text(entry.get('note')) or ''):
+        value = _number(float(bpm)) if bpm else None
+        if value is None or value in seen:
+            continue
+        seen.add(value)
+        levels.append({'bpm': value, 'source': f'family {ratio}',
+                       'relative_strength': (_number(float(strength))
+                                             if strength else None)})
+    return levels
+
+
+def select_tempo_level(entry, wanted):
+    """The measured level a human chose, or a refusal naming every option.
+
+    The whole rule of this flag: a value may be selected only because the
+    measurement itself reported it. An unexplained BPM must not become a slot,
+    because a slot is what the prompt is allowed to state and what
+    `numbers_trace` will then certify as traced to the fact sheet.
+    """
+    target = _number(wanted)
+    if target is None:
+        raise BrainError(f'{wanted!r} is not a tempo in BPM.')
+    levels = tempo_levels(entry)
+    if not levels:
+        raise BrainError(
+            'This sheet reports no usable tempo, so there is no level to '
+            'select. Compose without a BPM.')
+    hits = sorted((abs(level['bpm'] - target), level) for level in levels
+                  if abs(level['bpm'] - target) <= TEMPO_MATCH_BPM)
+    if hits:
+        return dict(hits[0][1])
+    offered = ', '.join(f'{level["bpm"]} ({level["source"]})'
+                        for level in levels)
+    thin = ('; this sheet\'s tempo note names its competing levels by ratio '
+            'with no BPM, so only the primary can be offered from it'
+            if _text(entry.get('note')) and len(levels) == 1 else '')
+    raise BrainError(
+        f'{target} BPM is not a level this measurement reported. Selectable: '
+        f'{offered}{thin}. Only a value the measurement itself reported may '
+        f'be selected, because the prompt may only state what the fact sheet '
+        f'measured.')
+
+
+def slots(sheet, hold_out=None, tempo_level=None):
     """Measurements to prompt phrases. An UNKNOWN never becomes a phrase.
 
     `hold_out` names one measured axis to deliberately keep OUT of the prompt.
@@ -374,9 +470,17 @@ def slots(sheet, hold_out=None):
         raise BrainError(
             f'{hold_out!r} is not an axis that can be held out. Choose one of '
             f'{", ".join(HOLD_OUT_CHOICES)}, or pass none for no control.')
+    # Holding the tempo axis out and choosing a value for it are contradictory
+    # instructions. Honouring either one silently would print a control or a
+    # selection that was not applied.
+    if tempo_level is not None and hold_out == 'tempo':
+        raise BrainError(
+            'The tempo axis cannot be held out and selected at the same time. '
+            'Hold it out to run a control, or select a level to answer the '
+            'question the sheet asked, not both.')
     out = {'moods': [], 'instruments': [], 'vocals': [], 'production': [],
            'direction': [], 'midi_only': [], 'unusable': [], 'ask_first': [],
-           'held_out': hold_out}
+           'held_out': hold_out, 'tempo_selection': None}
     for axis, entry in _facts(sheet).items():
         if (not isinstance(entry, dict)
                 or entry.get('confidence') == 'UNKNOWN'
@@ -384,14 +488,39 @@ def slots(sheet, hold_out=None):
             out['unusable'].append(axis)
 
     tempo = None if hold_out == 'tempo' else _usable(sheet, 'tempo')
+    if tempo_level is not None and not tempo:
+        raise BrainError(
+            'This sheet has no usable tempo to select a level from, so there '
+            'is nothing to answer. Compose without a BPM.')
+    # A selection replaces the primary, and it may only be a level the
+    # measurement reported. select_tempo_level raises rather than falling back,
+    # because a BPM that resolved to nothing must never reach a slot: a slot is
+    # exactly what numbers_trace will later certify as traced to the sheet.
+    chosen = select_tempo_level(tempo, tempo_level) if (
+        tempo and tempo_level is not None) else None
     beats = _number(tempo.get('value')) if tempo else None
+    if chosen is not None:
+        beats = chosen['bpm']
+        strength = ('' if chosen['relative_strength'] is None
+                    else f', tempogram relative strength '
+                         f'{chosen["relative_strength"]}')
+        chosen['note'] = (
+            f'{chosen["bpm"]} BPM selected by a human from the measured tempo '
+            f'family, as the {chosen["source"]} member{strength}. The sheet '
+            f'reports a primary of {_number(tempo.get("value"))} BPM.')
+        out['tempo_selection'] = chosen
     if beats is not None:
         out['moods'].append(f'{round(beats)} BPM')
         # See THE TEMPO RULE in the plan. _usable already drops an UNKNOWN
         # tempo, so nothing reaches here without a value, but an INFER tempo
         # whose family holds a competing metrical level is a minority reading
         # and the agent must not silently turn it into a tag.
-        if tempo['confidence'] != 'KNOW':
+        #
+        # A selection IS that answer, so it settles this question on its own.
+        # Requiring --acknowledge as well would ask the user to confirm they
+        # answered the question they have just answered. Any other ask_first
+        # entry is untouched and still needs acknowledging.
+        if tempo['confidence'] != 'KNOW' and chosen is None:
             out['ask_first'].append(
                 f'tempo is graded {tempo["confidence"]}: {tempo.get("note")}')
     elif tempo:

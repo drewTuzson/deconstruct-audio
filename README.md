@@ -76,7 +76,7 @@ This creates a private `.venv` inside the skill folder and installs `requirement
 | `compare <reference> <candidate>` | Scores a candidate fact sheet against a reference one on the axes measured on both sides. Exit code carries the verdict |
 | `midi <facts.json>` | Writes the measured chord progression to `progression.mid` at the measured tempo. One chord per bar, root position, root and fifth wherever no third was measured, a sustained root where confidence was too low to name a chord |
 | `research <facts.json>` | Records scene and era claims gathered for a supplied artist or song name, in their own file, and prints every collision with a measured fact. The measurement is authoritative on every collision |
-| `prompt <facts.json>` | Fills your connected Brain's slots from the fact sheet alone and, when given a composed style, checks it against the Brain's own rules: budget, negation, hyphens, banned words, direction prose, BPM placement, and whether every number traces to a measurement. Exit code carries the verdict |
+| `prompt <facts.json>` | Fills your connected Brain's slots from the fact sheet alone and, when given a composed style, checks it against the Brain's own rules: budget, negation, hyphens, banned words, direction prose, BPM placement, and whether every number traces to a measurement. `--tempo-level` records a human's answer to an `INFER` tempo, accepting only a level the measurement reported. Exit code carries the verdict |
 | `connect-brain <folder>` | Saves a pointer to a local SunoGPT Brain folder |
 | `disconnect-brain` | Removes that pointer without touching the Brain files |
 | `forget-key` | Deletes the locally saved credential. Does not revoke the key at Google |
@@ -193,6 +193,23 @@ budget rather than merely asserted. Anything unaccounted on either side fails, s
 "written from the fact sheet alone" is something a reader can check rather than
 something to take on trust.
 
+When the tempo is graded `INFER`, the command prints an `ASK_FIRST=` line naming
+the competing metrical levels and refuses to choose between them. `--tempo-level`
+is how you record the answer once a human has given it:
+
+```
+prompt facts.json --tempo-level 161.5
+```
+
+You may only select a value the measurement itself reported, which is the primary
+or a member of its family. Anything else is refused and the message names every
+selectable value, because a BPM nobody measured must not become a slot the prompt
+is then allowed to state. The choice is echoed as
+`TEMPO_LEVEL=161.5 SOURCE=family 2x` and recorded in `slots.json` with the level's
+relative strength, so a reader can see which reading the prompt was anchored to.
+Selecting a level answers the tempo question on its own; any other `ASK_FIRST`
+line still needs `--acknowledge`.
+
 `--hold-out` keeps one measured axis out of the prompt on purpose while the
 scorer still measures it on both sides. It is the control: if the carried axes
 match the reference and the held out one does not, the fact sheet is what carried
@@ -251,7 +268,7 @@ If you already own SunoGPT's Brain, `connect-brain` saves a pointer to your loca
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The 330 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
+The 349 tests cover credential handling, config validation, doctor output on malformed files and on a missing audio stack, upload and cleanup branches, failure paths that retain measurements, the finite-value guarantees on the measurement path, stem caching and cache permissions, the tempo family's confidence grading, and the comparison gates and exit codes. They run against mocks and synthetic audio. One test performs a real separation and is skipped unless `DECONSTRUCT_AUDIO_RUN_SEPARATION=1` and `DECONSTRUCT_AUDIO_TEST_TRACK` are set. Passing tests say nothing about real API access, real key validity, or whether the musical description is any good.
 
 The release in this repository is the revision its author ran end to end on macOS. The Windows and Linux code paths are written and covered by mocked tests, but have not been exercised on those operating systems.
 

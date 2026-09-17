@@ -328,6 +328,153 @@ class SlotTests(unittest.TestCase):
     def test_a_known_tempo_asks_nothing(self):
         self.assertEqual(self.slots['ask_first'], [])
 
+
+# The note a competing metrical level produces, in the shape tempo.py writes
+# it. This is our own output about a measured track, not third party material.
+FAMILY_NOTE = ('Methods agree but the tempogram shows a competing metrical '
+               'level with meaningful support: 3/4 at 64.6 BPM (tempogram '
+               'relative strength 0.60); 4/3 at 107.7 BPM (tempogram relative '
+               'strength 0.74); 1.5x at 129.2 BPM (tempogram relative '
+               'strength 0.43); 2x at 161.5 BPM (tempogram relative strength '
+               '0.90)')
+INFER_TEMPO = {'value': 80.7, 'unit': 'bpm', 'confidence': 'INFER',
+               'suno_actionable': 'direct', 'note': FAMILY_NOTE}
+
+
+def _family_sheet(**over):
+    entry = dict(INFER_TEMPO)
+    entry.update(over)
+    return _sheet_with(tempo=entry)
+
+
+class TempoLevelTests(unittest.TestCase):
+    """Answering the question ASK_FIRST asks.
+
+    The pipeline could raise an INFER tempo and could suppress the complaint,
+    but it had no way to accept an answer: writing the chosen level into the
+    style orphaned it on numbers_trace, because the only traceable BPM was the
+    primary. The question was therefore advice, and the pre spend checklist's
+    step 2 was decorative.
+    """
+
+    def test_it_reads_every_level_the_measurement_reported(self):
+        levels = b.tempo_levels(INFER_TEMPO)
+        self.assertEqual(sorted(l['bpm'] for l in levels),
+                         [64.6, 80.7, 107.7, 129.2, 161.5])
+        self.assertIn('primary', [l['source'] for l in levels])
+
+    def test_a_family_member_resolves_and_carries_its_label(self):
+        chosen = b.select_tempo_level(INFER_TEMPO, 161.5)
+        self.assertEqual(chosen['bpm'], 161.5)
+        self.assertEqual(chosen['source'], 'family 2x')
+        self.assertEqual(chosen['relative_strength'], 0.9)
+
+    def test_the_primary_resolves(self):
+        chosen = b.select_tempo_level(INFER_TEMPO, 80.7)
+        self.assertEqual(chosen['bpm'], 80.7)
+        self.assertEqual(chosen['source'], 'primary')
+
+    def test_the_whole_number_a_prompt_would_state_resolves(self):
+        # The style says '162 BPM', not '161.5 BPM', so the integer has to
+        # round trip or the flag cannot be reused on a rerun.
+        self.assertEqual(b.select_tempo_level(INFER_TEMPO, 162)['bpm'], 161.5)
+        self.assertEqual(b.select_tempo_level(INFER_TEMPO, 161)['bpm'], 161.5)
+
+    def test_a_value_the_measurement_never_reported_is_refused(self):
+        with self.assertRaises(b.BrainError) as caught:
+            b.select_tempo_level(INFER_TEMPO, 160)
+        message = str(caught.exception)
+        for value in ('64.6', '80.7', '107.7', '129.2', '161.5'):
+            self.assertIn(value, message)
+
+    def test_a_tempo_with_no_family_offers_only_its_primary(self):
+        plain = {'value': 80.7, 'unit': 'bpm', 'confidence': 'KNOW',
+                 'suno_actionable': 'direct', 'note': None}
+        self.assertEqual([l['bpm'] for l in b.tempo_levels(plain)], [80.7])
+        with self.assertRaises(b.BrainError):
+            b.select_tempo_level(plain, 161.5)
+
+    def test_a_note_naming_ratios_without_bpms_offers_only_the_primary(self):
+        # The branch tempo.py takes when methods differ by a non octave ratio.
+        # Its note carries the ratio labels and no BPM, so the family's own
+        # values did not survive into the sheet and cannot be offered. This
+        # refuses a level the measurement did report, which is the safe
+        # direction, and the message says why rather than implying the family
+        # is empty.
+        thin = dict(INFER_TEMPO,
+                    note='Methods differ by a non-octave ratio: 4/3, 2x')
+        self.assertEqual([l['bpm'] for l in b.tempo_levels(thin)], [80.7])
+        with self.assertRaises(b.BrainError) as caught:
+            b.select_tempo_level(thin, 107.7)
+        self.assertIn('no BPM', str(caught.exception))
+
+    def test_the_selection_reaches_the_moods_slot(self):
+        filled = b.slots(_family_sheet(), tempo_level=161.5)
+        self.assertEqual(filled['moods'], ['162 BPM'])
+        self.assertNotIn('81 BPM', filled['moods'])
+
+    def test_the_selected_number_traces(self):
+        filled = b.slots(_family_sheet(), tempo_level=161.5)
+        self.assertIn((162, 'bpm'), b.slot_quantities(filled))
+        results = b.validate('162 BPM. It opens quietly. It ends loudly.',
+                             GOOD_EXCLUDE, SHEET, rules(), filled=filled,
+                             declared=('It opens quietly', 'It ends loudly'),
+                             dropped=tuple(
+                                 p for key in b.SLOT_KEYS
+                                 for p in filled[key] if 'BPM' not in p))
+        self.assertEqual(check(results, 'numbers_trace')['verdict'], 'PASS')
+
+    def test_the_selection_records_who_chose_it_and_from_where(self):
+        filled = b.slots(_family_sheet(), tempo_level=161.5)
+        chosen = filled['tempo_selection']
+        self.assertEqual(chosen['bpm'], 161.5)
+        self.assertEqual(chosen['source'], 'family 2x')
+        self.assertEqual(chosen['relative_strength'], 0.9)
+        self.assertIn('selected', chosen['note'].lower())
+        self.assertIn('2x', chosen['note'])
+        self.assertIn('0.9', chosen['note'])
+
+    def test_selecting_a_level_answers_the_tempo_question_on_its_own(self):
+        # Rule 4. Making the user pass --acknowledge as well would be asking
+        # them to confirm they answered the question they just answered.
+        filled = b.slots(_family_sheet(), tempo_level=161.5)
+        self.assertEqual(filled['ask_first'], [])
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'PASS')
+
+    def test_another_question_still_needs_acknowledging(self):
+        filled = b.slots(_family_sheet(), tempo_level=161.5)
+        filled['ask_first'] = ['some other axis wants a human answer']
+        results = b.validate(GOOD_STYLE, GOOD_EXCLUDE, SHEET, rules(),
+                             filled=filled)
+        self.assertEqual(check(results, 'ask_first')['verdict'], 'FAIL')
+
+    def test_without_the_flag_nothing_changes(self):
+        # Rule 6. This adds a way to answer; it does not move the default.
+        before = b.slots(_family_sheet())
+        self.assertEqual(before['moods'], ['81 BPM'])
+        self.assertIsNone(before['tempo_selection'])
+        self.assertEqual(len(before['ask_first']), 1)
+        self.assertEqual(before, b.slots(_family_sheet(), tempo_level=None))
+
+    def test_a_refused_level_stops_the_run_rather_than_guessing(self):
+        with self.assertRaises(b.BrainError):
+            b.slots(_family_sheet(), tempo_level=160)
+
+    def test_a_held_out_tempo_cannot_also_be_selected(self):
+        # Holding the axis out and choosing a value for it are contradictory
+        # instructions, and silently honouring one would print a control that
+        # was not applied.
+        with self.assertRaises(b.BrainError):
+            b.slots(_family_sheet(), hold_out='tempo', tempo_level=161.5)
+
+    def test_an_unusable_tempo_cannot_be_selected(self):
+        unknown = {'value': None, 'unit': 'bpm', 'confidence': 'UNKNOWN',
+                   'suno_actionable': 'direct'}
+        with self.assertRaises(b.BrainError):
+            b.slots(_sheet_with(tempo=unknown), tempo_level=161.5)
+
     def test_a_malformed_axis_is_unusable_rather_than_a_crash(self):
         # read_facts guarantees the file is a JSON object, not that every axis
         # carries a Fact. Reaching entry.get on a non Fact raised a bare
@@ -988,6 +1135,43 @@ class CommandTests(unittest.TestCase):
         self.facts.write_text(json.dumps(infer), encoding='utf-8')
         done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
         self.assertIn('ASK_FIRST=tempo is graded INFER', done.stdout)
+
+    def _family_facts(self):
+        sheet = json.loads(json.dumps(FULL_SHEET))
+        sheet['facts']['tempo'] = dict(INFER_TEMPO)
+        self.facts.write_text(json.dumps(sheet), encoding='utf-8')
+
+    def test_a_selected_level_is_printed_and_reaches_the_slots(self):
+        self.connect()
+        self._family_facts()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--tempo-level', '161.5')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('TEMPO_LEVEL=161.5 SOURCE=family 2x', done.stdout)
+        self.assertNotIn('ASK_FIRST=', done.stdout)
+        written = json.loads((self.out / 'slots.json').read_text())
+        self.assertEqual(written['moods'], ['162 BPM'])
+        self.assertEqual(written['tempo_selection']['source'], 'family 2x')
+
+    def test_a_level_the_measurement_never_reported_is_authored(self):
+        self.connect()
+        self._family_facts()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out),
+                            '--tempo-level', '160')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('not a level this measurement reported', done.stderr)
+        self.assertIn('161.5', done.stderr)
+        self.assertNotIn('Details suppressed', done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
+
+    def test_without_the_flag_the_question_is_still_asked(self):
+        self.connect()
+        self._family_facts()
+        done = self.run_cli('prompt', str(self.facts), '--out', str(self.out))
+        self.assertIn('ASK_FIRST=tempo is graded INFER', done.stdout)
+        self.assertNotIn('TEMPO_LEVEL=', done.stdout)
+        written = json.loads((self.out / 'slots.json').read_text())
+        self.assertEqual(written['moods'], ['81 BPM'])
 
     def test_an_unusable_axis_is_named_rather_than_left_to_be_noticed(self):
         self.connect()
